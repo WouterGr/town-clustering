@@ -51,6 +51,16 @@ local VARIATION_RATIO_MAX <const> = { 1.00, 0.92, 0.80, 0.55 }
 --- towns in the conurbations.
 local ISOLATED_SIZE_SCALE <const> = 0.45
 
+--- Isolated towns come in small groups instead of alone: a lone town in an empty
+--- stretch claims all of it, which is a poor fit for TF3's town regions, noise
+--- and pollution. Each group is an anchor - a town far from every cluster - plus
+--- up to two of its nearest generated neighbours within ISOLATED_GROUP_REACH,
+--- all kept where the generator put them and scaled down. Anchors stay
+--- ISOLATED_GROUP_GAP apart, so the groups do not line up along the one empty
+--- strip the clusters left behind.
+local ISOLATED_GROUP_REACH <const> = 3000.0
+local ISOLATED_GROUP_GAP <const> = 4500.0
+
 --- Only rearrange a genuinely fresh game. Adding this mod to an established
 --- save and silently rebuilding half its towns would be catastrophic, so bail
 --- out if any meaningful time has passed.
@@ -1122,16 +1132,81 @@ local function redistribute() : integer
 		end
 	end
 
-	-- Spare a few of the movers as isolated towns: they stay out in the country
+	-- Spare some of the movers as isolated towns: they stay out in the country
 	-- where they were generated and are scaled down, so they read as outlying
-	-- hamlets rather than as peers of the towns in the conurbations. Taken from
-	-- the far end and spaced out, so they sit well away from the clusters.
+	-- hamlets rather than as peers of the towns in the conurbations.
+	--
+	-- They come in groups of two or three: an anchor far from every cluster,
+	-- plus its nearest movers within reach. Anchors are taken from the far end,
+	-- kept apart from each other and, where possible, off the border; each pass
+	-- below relaxes one of those if the first could not place them all.
 	local isolated : {Candidate} = {}
-	for i = 1, isolatedCount do
-		local index = total - (i - 1) * 2
-		if towns[index] ~= nil and towns[index].kind == "move" then
-			towns[index].kind = "isolated"
-			isolated[#isolated + 1] = towns[index]
+	local groupSizes : {integer} = {}
+	local anchors : {Candidate} = {}
+	local remaining = isolatedCount
+	local passes : {{number}} = {
+		{ EDGE_SPOT_SOFT, ISOLATED_GROUP_GAP },
+		{ 0, ISOLATED_GROUP_GAP },
+		{ 0, 0.6 * ISOLATED_GROUP_GAP },
+		{ 0, 0 },
+	}
+	for passIndex, pass in ipairs(passes) do
+		local edgeNeed, gap = pass[1], pass[2]
+		for index = total, 1, -1 do
+			if remaining <= 0 then break end
+			local town = towns[index]
+			local ok = town.kind == "move" and edgeDistance(bounds, town.x, town.y) >= edgeNeed
+			if ok then
+				for __, a in ipairs(anchors) do
+					if distance2(town.x, town.y, a.x, a.y) < gap * gap then
+						ok = false
+						break
+					end
+				end
+			end
+
+			-- The movers within reach, nearest first: the candidate companions.
+			-- Only the last pass accepts an anchor without any, since a lone
+			-- isolated town is what the grouping is meant to avoid.
+			local near : {Candidate} = {}
+			if ok then
+				for __, other in ipairs(towns) do
+					if other ~= town and other.kind == "move"
+						and distance2(town.x, town.y, other.x, other.y) <= ISOLATED_GROUP_REACH * ISOLATED_GROUP_REACH then
+						near[#near + 1] = other
+					end
+				end
+				if #near == 0 and passIndex < #passes then
+					ok = false
+				end
+			end
+
+			if ok then
+				town.kind = "isolated"
+				isolated[#isolated + 1] = town
+				anchors[#anchors + 1] = town
+				remaining = remaining - 1
+
+				-- one or two companions, never leaving a single isolated town over
+				local want = 1
+				if remaining >= 2 and nextRandom(rng) < 0.5 then want = 2 end
+				if remaining == 2 then
+					want = 2 -- a pair would leave one alone; take both
+				elseif remaining == 3 then
+					want = 1 -- leaves two, which make the next pair
+				end
+				table.sort(near, function(a : Candidate, b : Candidate) : boolean
+					return distance2(town.x, town.y, a.x, a.y) < distance2(town.x, town.y, b.x, b.y)
+				end)
+				local size = 1
+				for i = 1, math.min(want, #near, remaining) do
+					near[i].kind = "isolated"
+					isolated[#isolated + 1] = near[i]
+					remaining = remaining - 1
+					size = size + 1
+				end
+				groupSizes[#groupSizes + 1] = size
+			end
 		end
 	end
 
@@ -1314,6 +1389,27 @@ local function redistribute() : integer
 	log.message(LOG .. string.format(
 		"EDGE %d of %d centres within %.0f m of the border; %d of %d moved towns within %.0f m",
 		edgeCentres, #centres, margin, edgeMoved, movedTotal, EDGE_SPOT_SOFT))
+
+	-- Isolated groups, and how alone the loneliest isolated town still is.
+	local sizesText = ""
+	for i, n in ipairs(groupSizes) do
+		if i > 1 then sizesText = sizesText .. "/" end
+		sizesText = sizesText .. tostring(n)
+	end
+	local loneliest = 0.0
+	for __, town in ipairs(isolated) do
+		local best = math.huge
+		for __, other in ipairs(towns) do
+			if other ~= town then
+				local d = distance2(town.x, town.y, other.x, other.y)
+				if d < best then best = d end
+			end
+		end
+		loneliest = math.max(loneliest, math.sqrt(best))
+	end
+	log.message(LOG .. string.format(
+		"ISOLATED %d towns in %d groups sized %s; loneliest is %.0f m from its nearest neighbour",
+		#isolated, #groupSizes, sizesText, loneliest))
 
 	local sizes = ""
 	for i = 1, #centres do

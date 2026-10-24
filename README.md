@@ -52,7 +52,7 @@ left exactly as the stock generator made them.
 | Cluster Density     | Packed ... Scattered (8 steps) | Typical distance between towns in a cluster, ~700 m to ~1900 m |
 | Cluster Shapes      | Round only / Mixed / Varied  | Layout of each cluster: round, stretched, chain, several cores, or core with satellites |
 | Towns Left In Place | 30% / 45% / 60% / 75% / 100% | Share that keeps its generated position; the rest move |
-| Isolated Towns      | None / 5% / 10% / 20%        | Share of the moved towns left standing alone          |
+| Isolated Towns      | None / 5% / 10% / 20%        | Share of the moved towns left in the country, in small groups of 2-3 |
 
 No need to touch Town Density: the mod moves towns rather than removing them, so
 the count you chose is the count you get.

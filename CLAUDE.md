@@ -48,8 +48,13 @@ param's `values` list.
 `cluster.keep` is the share of generated towns that keep the position the
 generator gave them; the rest are moved next to a cluster. The total never
 changes, so Town Density needs no adjustment. `cluster.isolated` is the share of
-the moved towns left standing alone out in the country, scaled down so they read
-as outlying hamlets.
+the moved towns left out in the country, scaled down so they read as outlying
+hamlets. They come in groups of 2-3 rather than alone (a lone town in an empty
+stretch claims all of it): an anchor far from every cluster plus up to two of its
+nearest generated neighbours within 3 km, all left where the generator put them.
+Anchors stay 4.5 km apart and preferably 1.5 km off the border; a candidate with
+no neighbour in reach is only accepted in the last pass. The ISOLATED log line
+reports the group sizes and how far the loneliest isolated town is from anyone.
 
 `cluster.density` sets the required spacing at a cluster's core
 (530 / 610 / 700 / 770 / 870 / 1020 / 1210 / 1440 m), calibrated so the median

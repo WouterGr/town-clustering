@@ -91,7 +91,7 @@
             "defaultIndex": 3,
             "key": "cluster.isolated",
             "name": "Isolated Towns",
-            "tooltip": "What share of the moved towns stay out in the country instead of joining a cluster.\n\nIsolated towns are scaled down, so they read as outlying hamlets.",
+            "tooltip": "What share of the moved towns stay out in the country instead of joining a cluster.\n\nIsolated towns are scaled down, so they read as outlying hamlets, and come in small groups of two or three rather than alone.",
             "uiType": "Slider",
             "values": [
                 "None",
