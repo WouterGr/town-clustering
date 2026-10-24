@@ -129,12 +129,15 @@ local CHAIN_LENGTH_PER_TOWN_MAX <const> = 1.2
 local CHAIN_MAX_TURN <const> = 0.6
 
 --- Polycentric: the extra cores sit this far from the first. Satellite: the
---- outlying towns sit this far from the core. Both are metres at Normal
---- density and scale up with looser settings, so the parts stay distinct.
+--- outlying towns sit this far beyond the edge of the core - measured from the
+--- edge rather than the centre, because a large core already reaches 2 km or
+--- more and swallowed satellites placed a fixed distance from its centre. Both
+--- are metres at Normal density and scale up with looser settings, so the parts
+--- stay distinct.
 local POLY_GAP_MIN <const> = 1500.0
 local POLY_GAP_MAX <const> = 3000.0
-local SATELLITE_DIST_MIN <const> = 2500.0
-local SATELLITE_DIST_MAX <const> = 4000.0
+local SATELLITE_GAP_MIN <const> = 1500.0
+local SATELLITE_GAP_MAX <const> = 2500.0
 local SATELLITE_SHARE <const> = 0.35
 local SHAPE_REFERENCE_SPACING <const> = 770.0
 
@@ -158,6 +161,11 @@ local EDGE_SPOT_MIN_WEIGHT <const> = 0.25
 --- satellite) is drawn up to ORIENT_TRIES times until it stays EDGE_SPOT_SOFT
 --- clear of the border; failing that, the draw that stays clearest is used.
 local ORIENT_TRIES <const> = 4
+
+--- Cluster sizes go to centres by room (see redistribute); each centre's room
+--- is jittered by up to this share so the largest cluster is usually, not
+--- always, the one with the most space.
+local ROOM_JITTER <const> = 0.3
 local ANGLES_PER_RING <const> = 12
 
 --- How far a town may wander off its ring, as a share of that ring's radius.
@@ -730,19 +738,24 @@ local function buildShape(kind : string, cx : number, cy : number, spacing : num
 	elseif kind == "satellite" then
 		local count = math.min(5, math.max(3, math.floor(expected * SATELLITE_SHARE + 0.5)))
 		count = math.max(1, math.min(count, expected - 2))
+		-- The reach the core is expected to fill, by the same rule as
+		-- assignQuotas uses once the exact numbers are known.
+		local coreReach = math.max(2 * spacing, 0.75 * spacing * math.sqrt(expected - count))
 		local heading = nextRandom(rng) * math.pi * 2
 		local arc = math.pi * 2 / count
 		for i = 1, count do
 			local a = heading + (i - 1) * arc + (nextRandom(rng) - 0.5) * arc * 0.5
-			local d = scale * between(SATELLITE_DIST_MIN, SATELLITE_DIST_MAX, rng)
+			local gap = scale * between(SATELLITE_GAP_MIN, SATELLITE_GAP_MAX, rng)
+			local d = coreReach + gap
 			local ax, ay = cx + math.cos(a) * d, cy + math.sin(a) * d
 			-- A satellite off the map or against the border moves round the
-			-- core, then closer in, keeping the clearest of a few tries.
+			-- core, then closer in (never into the core), keeping the clearest
+			-- of a few tries.
 			local clear = edgeDistance(bounds, ax, ay)
 			for try = 2, ORIENT_TRIES do
 				if clear >= EDGE_SPOT_SOFT then break end
 				local ta = a + (nextRandom(rng) - 0.5) * arc
-				local td = d * (1 - 0.15 * (try - 1))
+				local td = coreReach + gap * (1 - 0.2 * (try - 1))
 				local tx, ty = cx + math.cos(ta) * td, cy + math.sin(ta) * td
 				local c = edgeDistance(bounds, tx, ty)
 				if c > clear then
@@ -1012,9 +1025,9 @@ local function redistribute() : integer
 	-- geometric series - one conurbation dominates, a couple are middling, one
 	-- is a modest group - and every later share follows those weights.
 	--
-	-- The ratio varies per map, and which centre draws which weight is shuffled,
-	-- so the big one is not always whichever centre the sampling happened to
-	-- pick first.
+	-- The ratio varies per map, and which centre draws which weight follows how
+	-- much room each centre has (below), so the big one is not simply whichever
+	-- centre the sampling happened to pick first.
 	local ratio = ratioLow + nextRandom(rng) * (ratioHigh - ratioLow)
 	local weights : {number} = {}
 	local w = 1.0
@@ -1026,9 +1039,33 @@ local function redistribute() : integer
 		end
 		w = w * ratio
 	end
-	for i = #centres, 2, -1 do
-		local j = 1 + math.floor(nextRandom(rng) * i)
-		weights[i], weights[j] = weights[j], weights[i]
+	-- The largest clusters go preferably to the centres with the most room
+	-- around them. A big cluster spreads furthest, and given to a centre near
+	-- the border it spilled up to it: in a test run the two largest clusters
+	-- sat 2 and 2.5 km from the edge. Room is the distance to the border and
+	-- to the nearest other centre, whichever is less, jittered so the order is
+	-- a tendency rather than a rule.
+	local room : {number} = {}
+	for i = 1, #centres do
+		local r = edgeDistance(bounds, centreX[i], centreY[i])
+		for j = 1, #centres do
+			if j ~= i then
+				r = math.min(r, 0.5 * math.sqrt(distance2(centreX[i], centreY[i], centreX[j], centreY[j])))
+			end
+		end
+		room[i] = r * between(1 - ROOM_JITTER, 1 + ROOM_JITTER, rng)
+	end
+	local byRoom : {integer} = {}
+	for i = 1, #centres do byRoom[i] = i end
+	table.sort(byRoom, function(a : integer, b : integer) : boolean
+		if room[a] ~= room[b] then return room[a] > room[b] end
+		return a < b
+	end)
+	-- weights were built largest first
+	local ordered : {number} = {}
+	for i = 1, #weights do ordered[i] = weights[i] end
+	for rank, i in ipairs(byRoom) do
+		weights[i] = ordered[rank]
 	end
 
 	-- Each cluster's shape, laid out around its centre. A shape needs to know

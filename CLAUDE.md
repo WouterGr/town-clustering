@@ -61,8 +61,8 @@ grows from one spacing out from the core to 1.5x at the cluster's expected radiu
 `cluster.shapes` gives each cluster a shape instead of rings around one town:
 round, elongated (1.8-3x along a random direction), chain (a bending line,
 0.8-1.2 spacings per town), polycentric (2-3 cores 1.5-3 km apart) or satellite
-(a core plus 3-5 single towns 2.5-4 km out; distances scale up with looser
-density). Varied draws all five equally, Mixed is 40% round, and clusters
+(a core plus 3-5 single towns 1.5-2.5 km beyond the edge of the core; distances
+scale up with looser density). Varied draws all five equally, Mixed is 40% round, and clusters
 expected to hold fewer than 5 towns only draw round, elongated or chain.
 Generated towns belong to the cluster whose *shape* they are nearest, and the
 nearest ones stay. Each shape is logged as a SHAPE line; `tools/plot_run.py`
@@ -76,6 +76,10 @@ claims. Chain and elongated directions and polycentric/satellite points are
 redrawn (up to 4 tries) until they stay 1.5 km clear of the border, and town
 spots within 1.5 km of it are picked at down to 0.25x the usual chance. The EDGE
 log line reports how many centres and moved towns still sit near the border.
+Cluster sizes go to centres by room: the largest weight to the centre with the
+most space (distance to the border or half the distance to the nearest other
+centre, whichever is less, jittered by up to 30%), so big clusters do not spill
+against the border.
 
 There is no "cluster rate" parameter. An earlier draft specified one; it was
 replaced by `cluster.keep` + `cluster.isolated`, which say the same thing in
