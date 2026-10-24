@@ -66,11 +66,35 @@ local MAX_START_GAME_TIME <const> = 60 * 60 * 24 * 10
 ---
 --- Note that a cluster centre is itself a town, so it occupies the middle
 --- before any mover is placed: the innermost ring that can actually be used is
---- the first one wider than this spacing, not FIRST_RING.
+--- the first one wider than this spacing, not the first ring.
 local MIN_TOWN_SPACING <const> = 600.0
-local FIRST_RING <const> = 420.0
-local RING_STEP <const> = 240.0
-local MAX_RINGS <const> = 14
+
+--- Base spacing between town centres in a cluster, per Cluster Density slider
+--- position (Packed .. Scattered). MIN_TOWN_SPACING stays the hard floor under
+--- all of them. Packed is the closest to the original fixed 600 m, though the
+--- per-cluster multiplier and the growth towards the fringe still loosen it.
+local DENSITY_SPACINGS <const> = { 600.0, 700.0, 800.0, 950.0, 1100.0, 1300.0, 1550.0, 1800.0 }
+local DEFAULT_SPACING <const> = 950.0
+
+--- Spacing grows from the core of a cluster to its outskirts: a town at the
+--- cluster's expected radius needs (1 + SPACING_GROWTH) times the base spacing.
+--- Dense middle, looser fringe.
+local SPACING_GROWTH <const> = 0.5
+
+--- Each cluster draws its own multiplier on the base spacing, so one cluster
+--- comes out compact and another loose under the same settings.
+local CLUSTER_SPACING_MIN <const> = 0.80
+local CLUSTER_SPACING_MAX <const> = 1.25
+
+--- Ring geometry as a share of the cluster's own spacing. 0.7 and 0.4 are the
+--- original 420 m and 240 m at 600 m spacing, so Packed rings match the old ones.
+local FIRST_RING_SHARE <const> = 0.7
+local RING_STEP_SHARE <const> = 0.4
+local MAX_RINGS <const> = 18
+
+--- Half-width of the probe that measures the map, in metres. Generous: the
+--- probe binary-searches inside it, so a larger value costs a few calls only.
+local MAP_PROBE_LIMIT <const> = 200000.0
 local ANGLES_PER_RING <const> = 12
 
 --- How far a town may wander off its ring, as a share of that ring's radius.
@@ -132,6 +156,15 @@ local record Candidate
 	centre : integer
 	--- which of the three fates this town met
 	kind : string
+end
+
+--- A town position that later placements must keep clear of. Two towns must
+--- be at least the larger of their two spacings apart, so a town on the loose
+--- fringe of a cluster keeps its neighbours at the fringe's distance.
+local record Placed
+	x : number
+	y : number
+	spacing : number
 end
 
 local record State
@@ -206,20 +239,52 @@ local function pick(list : {number}, index : integer, fallback : number) : numbe
 	return fallback
 end
 
---- clusterCount, keepFraction, isolatedShare, ratioLow, ratioHigh
-local function readParams() : integer, number, number, number, number
+--- clusterCount, keepFraction, isolatedShare, ratioLow, ratioHigh, baseSpacing
+local function readParams() : integer, number, number, number, number, number
 	local all = api.engine.config.getModParams()
 	local own = all ~= nil and all[MOD_ID] as {string : integer} or nil
 	if own == nil then
 		log.message(LOG .. "no mod params found; using defaults")
-		return 4, 0.45, 0.10, 0.55, 0.80
+		return 4, 0.45, 0.10, 0.55, 0.80, DEFAULT_SPACING
 	end
 	local variation = own["cluster.variation"]
 	return math.floor(pick(CLUSTER_COUNTS as {number}, own["cluster.count"], 4)),
 		pick(KEEP_FRACTIONS, own["cluster.keep"], 0.45),
 		pick(ISOLATED_SHARES, own["cluster.isolated"], 0.10),
 		pick(VARIATION_RATIO_MIN, variation, 0.55),
-		pick(VARIATION_RATIO_MAX, variation, 0.80)
+		pick(VARIATION_RATIO_MAX, variation, 0.80),
+		pick(DENSITY_SPACINGS, own["cluster.density"], DEFAULT_SPACING)
+end
+
+--- How far the playable map reaches from `origin` along one direction, found
+--- by binary search on isValidCoordinate. Only needs the map to be one convex
+--- block around the origin, which every TF3 map is.
+local function probeExtent(ox : number, oy : number, dx : number, dy : number) : number
+	local lo, hi = 0.0, MAP_PROBE_LIMIT
+	for __ = 1, 40 do
+		if hi - lo < 1.0 then break end
+		local mid = (lo + hi) / 2
+		if api.engine.terrain.isValidCoordinate(api.type.Vec2f.new(ox + dx * mid, oy + dy * mid)) then
+			lo = mid
+		else
+			hi = mid
+		end
+	end
+	return lo
+end
+
+--- minX, maxX, minY, maxY of the playable map. Probed from the centre of the
+--- towns rather than from 0,0, so it still works if a map is not centred on
+--- the origin.
+local function mapBounds(towns : {Candidate}) : number, number, number, number
+	local sx, sy = 0.0, 0.0
+	for __, town in ipairs(towns) do
+		sx = sx + town.x
+		sy = sy + town.y
+	end
+	local ox, oy = sx / #towns, sy / #towns
+	return ox - probeExtent(ox, oy, -1, 0), ox + probeExtent(ox, oy, 1, 0),
+		oy - probeExtent(ox, oy, 0, -1), oy + probeExtent(ox, oy, 0, 1)
 end
 
 local function countTowns() : integer
@@ -332,11 +397,25 @@ end
 --- case the caller leaves the town where the generator put it rather than
 --- losing it. The flag is a separate return rather than a nil position, so the
 --- signature stays honest to Teal - the game type-checks this file at load.
-local function findSpot(cx : number, cy : number, placed : {{number, number}}, rng : Rng) : boolean, number, number
+---
+--- `spacing` is this cluster's base spacing (density slider times the
+--- cluster's own multiplier) and `clusterRadius` the radius the cluster is
+--- expected to fill. A candidate's required spacing grows from `spacing` at the
+--- core to (1 + SPACING_GROWTH) times it at that radius. Also returns the
+--- spacing the chosen spot demands, for later placements to respect.
+local function spacingAt(spacing : number, clusterRadius : number, reach : number) : number
+	local t = math.min(1.0, reach / clusterRadius)
+	return math.max(MIN_TOWN_SPACING, spacing * (1 + SPACING_GROWTH * t))
+end
+
+local function findSpot(cx : number, cy : number, spacing : number, clusterRadius : number,
+		placed : {Placed}, rng : Rng) : boolean, number, number, number
 	local step = math.pi * 2 / ANGLES_PER_RING
+	local firstRing = spacing * FIRST_RING_SHARE
+	local ringStep = spacing * RING_STEP_SHARE
 
 	for ring = 1, MAX_RINGS do
-		local radius = FIRST_RING + (ring - 1) * RING_STEP
+		local radius = firstRing + (ring - 1) * ringStep
 		local phase = nextRandom(rng) * math.pi * 2
 		local wobble = radius * JITTER_SHARE
 
@@ -353,15 +432,18 @@ local function findSpot(cx : number, cy : number, placed : {{number, number}}, r
 		-- after, so the spacing floor still holds exactly.
 		local spotsX : {number} = {}
 		local spotsY : {number} = {}
+		local spotsS : {number} = {}
 		for slot = 0, ANGLES_PER_RING - 1 do
 			local angle = phase + slot * step + (nextRandom(rng) - 0.5) * step * 0.8
 			local reach = radius + (nextRandom(rng) - 0.5) * 2 * wobble
 			local x = cx + math.cos(angle) * reach
 			local y = cy + math.sin(angle) * reach
+			local need = spacingAt(spacing, clusterRadius, reach)
 
 			local clear = true
 			for __, p in ipairs(placed) do
-				if distance2(x, y, p[1], p[2]) < MIN_TOWN_SPACING * MIN_TOWN_SPACING then
+				local gap = math.max(need, p.spacing)
+				if distance2(x, y, p.x, p.y) < gap * gap then
 					clear = false
 					break
 				end
@@ -369,15 +451,16 @@ local function findSpot(cx : number, cy : number, placed : {{number, number}}, r
 			if clear and isBuildable(x, y) then
 				spotsX[#spotsX + 1] = x
 				spotsY[#spotsY + 1] = y
+				spotsS[#spotsS + 1] = need
 			end
 		end
 
 		if #spotsX > 0 then
 			local choice = 1 + math.floor(nextRandom(rng) * #spotsX)
-			return true, spotsX[choice], spotsY[choice]
+			return true, spotsX[choice], spotsY[choice], spotsS[choice]
 		end
 	end
-	return false, 0, 0
+	return false, 0, 0, 0
 end
 
 --- Rebuild the town layout. Returns the number of towns the world should end up
@@ -398,7 +481,7 @@ local function redistribute() : integer
 	end
 	local total = #towns
 
-	local clusterCount, keepFraction, isolatedShare, ratioLow, ratioHigh = readParams()
+	local clusterCount, keepFraction, isolatedShare, ratioLow, ratioHigh, baseSpacing = readParams()
 	local stayCount = math.max(1, math.floor(total * keepFraction + 0.5))
 	if stayCount >= total then
 		log.message(LOG .. "every town stays put; nothing to do")
@@ -414,14 +497,31 @@ local function redistribute() : integer
 
 	local centres = chooseCentres(towns, clusterCount, rng)
 
-	-- Debug output for plotting a run outside the game. Logged before any town
-	-- moves: a centre is a reference into `towns`, so if the centre town itself
-	-- is moved later its x/y change with it.
-	log.message(LOG .. string.format(
-		"PARAMS count=%d keep=%.2f isolated=%.2f ratio=%.2f..%.2f",
-		clusterCount, keepFraction, isolatedShare, ratioLow, ratioHigh))
+	-- A centre is a reference into `towns`, so if the centre town itself is
+	-- moved its x/y change with it. Placement works from these fixed copies.
+	local centreX : {number} = {}
+	local centreY : {number} = {}
 	for i, centre in ipairs(centres) do
-		log.message(LOG .. string.format("CENTRE %d x=%.0f y=%.0f", i, centre.x, centre.y))
+		centreX[i] = centre.x
+		centreY[i] = centre.y
+	end
+
+	-- Each cluster's own spacing: the density slider times a per-cluster draw.
+	local clusterSpacing : {number} = {}
+	for i = 1, #centres do
+		clusterSpacing[i] = baseSpacing
+			* (CLUSTER_SPACING_MIN + nextRandom(rng) * (CLUSTER_SPACING_MAX - CLUSTER_SPACING_MIN))
+	end
+
+	local minX, maxX, minY, maxY = mapBounds(towns)
+
+	-- Debug output for plotting a run outside the game (tools/plot_run.py).
+	log.message(LOG .. string.format(
+		"PARAMS count=%d keep=%.2f isolated=%.2f ratio=%.2f..%.2f spacing=%.0f",
+		clusterCount, keepFraction, isolatedShare, ratioLow, ratioHigh, baseSpacing))
+	log.message(LOG .. string.format("BOUNDS x=%.0f..%.0f y=%.0f..%.0f", minX, maxX, minY, maxY))
+	for i = 1, #centres do
+		log.message(LOG .. string.format("CENTRE %d x=%.0f y=%.0f", i, centreX[i], centreY[i]))
 	end
 
 	for __, town in ipairs(towns) do
@@ -508,11 +608,13 @@ local function redistribute() : integer
 		end
 	end
 
-	-- Everything that is not moving occupies its spot already.
-	local placed : {{number, number}} = {}
+	-- Everything that is not moving occupies its spot already. Those towns ask
+	-- only for the hard floor; a mover placed near them brings its own, larger
+	-- spacing, and the pair rule takes the larger of the two.
+	local placed : {Placed} = {}
 	for __, town in ipairs(towns) do
 		if town.kind ~= "move" then
-			placed[#placed + 1] = { town.x, town.y }
+			placed[#placed + 1] = { x = town.x, y = town.y, spacing = MIN_TOWN_SPACING }
 		end
 	end
 
@@ -542,6 +644,17 @@ local function redistribute() : integer
 	local placedIn : {integer} = {}
 	for i = 1, #centres do placedIn[i] = 0 end
 
+	-- The radius each cluster is expected to fill: n towns at spacing s in a
+	-- roughly hexagonal packing cover a disc of about 0.53 * s * sqrt(n); 0.6
+	-- leaves room for the jitter. Spacing reaches its fringe value here.
+	local clusterRadius : {number} = {}
+	for i = 1, #centres do
+		local n = stays[i] + quota[i]
+		clusterRadius[i] = math.max(clusterSpacing[i], 0.6 * clusterSpacing[i] * math.sqrt(n))
+		log.message(LOG .. string.format("CLUSTER %d spacing=%.0f radius=%.0f towns=%d",
+			i, clusterSpacing[i], clusterRadius[i], n))
+	end
+
 	local moved, stranded = 0, 0
 	for __, town in ipairs(towns) do
 		if town.kind == "move" then
@@ -557,14 +670,15 @@ local function redistribute() : integer
 			local settled = false
 			for __, k in ipairs(order) do
 				if quota[k] - placedIn[k] > 0 then
-					local ok, x, y = findSpot(centres[k].x, centres[k].y, placed, rng)
+					local ok, x, y, need = findSpot(centreX[k], centreY[k],
+						clusterSpacing[k], clusterRadius[k], placed, rng)
 					if ok then
 						town.x = x
 						town.y = y
 						town.centre = k
 						placedIn[k] = placedIn[k] + 1
 						moved = moved + 1
-						placed[#placed + 1] = { x, y }
+						placed[#placed + 1] = { x = x, y = y, spacing = need }
 						settled = true
 						break
 					end
@@ -575,7 +689,7 @@ local function redistribute() : integer
 				-- it. A quieter result than losing a town.
 				town.kind = "stay"
 				stranded = stranded + 1
-				placed[#placed + 1] = { town.x, town.y }
+				placed[#placed + 1] = { x = town.x, y = town.y, spacing = MIN_TOWN_SPACING }
 			end
 		end
 	end
@@ -624,6 +738,7 @@ local function redistribute() : integer
 	-- from each town to its nearest neighbour - the number behind "towns in a
 	-- cluster are too close together".
 	local nearestDist : {number} = {}
+	local nearestMoved : {number} = {}
 	for i, town in ipairs(towns) do
 		log.message(LOG .. string.format("TOWN %s c=%d x=%.0f y=%.0f",
 			town.kind, town.centre, town.x, town.y))
@@ -635,14 +750,23 @@ local function redistribute() : integer
 			end
 		end
 		nearestDist[#nearestDist + 1] = math.sqrt(best)
+		if town.kind == "move" then
+			nearestMoved[#nearestMoved + 1] = math.sqrt(best)
+		end
 	end
-	table.sort(nearestDist)
-	local n = #nearestDist
-	log.message(LOG .. string.format(
-		"SPACING nearest neighbour: min=%.0f p10=%.0f median=%.0f p90=%.0f max=%.0f",
-		nearestDist[1], nearestDist[math.max(1, math.floor(n * 0.1 + 0.5))],
-		nearestDist[math.max(1, math.floor(n * 0.5 + 0.5))],
-		nearestDist[math.max(1, math.floor(n * 0.9 + 0.5))], nearestDist[n]))
+
+	local function logSpacing(label : string, list : {number})
+		if #list == 0 then return end
+		table.sort(list)
+		local n = #list
+		log.message(LOG .. string.format(
+			"SPACING %s: min=%.0f p10=%.0f median=%.0f p90=%.0f max=%.0f", label,
+			list[1], list[math.max(1, math.floor(n * 0.1 + 0.5))],
+			list[math.max(1, math.floor(n * 0.5 + 0.5))],
+			list[math.max(1, math.floor(n * 0.9 + 0.5))], list[n]))
+	end
+	logSpacing("nearest neighbour", nearestDist)
+	logSpacing("moved towns", nearestMoved)
 
 	local sizes = ""
 	for i = 1, #centres do

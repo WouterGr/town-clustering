@@ -39,6 +39,25 @@
             "yearTo": 0
         },
         {
+            "defaultIndex": 4,
+            "key": "cluster.density",
+            "name": "Cluster Density",
+            "tooltip": "How far apart the towns within a cluster are.\n\nPacked puts town centres 600 m apart, Scattered 1800 m. Spacing grows towards the edge of each cluster, and every cluster draws its own variation on top, so some come out tighter than others.",
+            "uiType": "Slider",
+            "values": [
+                "Packed",
+                "Very Dense",
+                "Dense",
+                "Normal",
+                "Loose",
+                "Very Loose",
+                "Sparse",
+                "Scattered"
+            ],
+            "yearFrom": 0,
+            "yearTo": 0
+        },
+        {
             "defaultIndex": 2,
             "key": "cluster.keep",
             "name": "Towns Left In Place",

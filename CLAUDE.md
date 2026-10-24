@@ -40,6 +40,7 @@ param's `values` list.
 |--------------------|----------------|--------------------------------------|
 | `cluster.count`    | Cluster Count  | 2 / 3 / 4 / 5 / 6 / 8                |
 | `cluster.variation` | Cluster Sizes | Equal / Mild / Varied / Lopsided    |
+| `cluster.density`  | Cluster Density | Packed / Very Dense / Dense / Normal / Loose / Very Loose / Sparse / Scattered |
 | `cluster.keep`     | Towns Left In Place | 30% / 45% / 60% / 75% / 100%    |
 | `cluster.isolated` | Isolated Towns | None / 5% / 10% / 20%                |
 
@@ -48,6 +49,11 @@ generator gave them; the rest are moved next to a cluster. The total never
 changes, so Town Density needs no adjustment. `cluster.isolated` is the share of
 the moved towns left standing alone out in the country, scaled down so they read
 as outlying hamlets.
+
+`cluster.density` sets the base spacing between town centres in a cluster
+(600 / 700 / 800 / 950 / 1100 / 1300 / 1550 / 1800 m). Each cluster multiplies it
+by its own draw (0.8-1.25), and spacing grows to 1.5x towards the cluster's
+expected radius. 600 m stays the hard floor.
 
 There is no "cluster rate" parameter. An earlier draft specified one; it was
 replaced by `cluster.keep` + `cluster.isolated`, which say the same thing in
