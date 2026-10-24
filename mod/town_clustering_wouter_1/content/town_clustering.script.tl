@@ -103,6 +103,40 @@ local MAX_RINGS <const> = 18
 --- Half-width of the probe that measures the map, in metres. Generous: the
 --- probe binary-searches inside it, so a larger value costs a few calls only.
 local MAP_PROBE_LIMIT <const> = 200000.0
+
+--- Cluster shapes. Every cluster is laid out along one of these rather than in
+--- rings around a single town, chosen per cluster by the Cluster Shapes slider:
+--- Round only, Mixed (MIXED_WEIGHTS, in SHAPE_KINDS order) or Varied (equal).
+local SHAPE_KINDS <const> = { "round", "elongated", "chain", "polycentric", "satellite" }
+local MIXED_WEIGHTS <const> = { 0.40, 0.15, 0.15, 0.15, 0.15 }
+local DEFAULT_SHAPE_MODE <const> = 3
+
+--- A cluster expected to hold fewer towns than this is too small to read as
+--- several cores or as a core with outliers, so it draws from the first three
+--- kinds only.
+local MIN_TOWNS_MULTI_CORE <const> = 5
+
+--- Elongated: stretched along a random direction by this much (the area stays
+--- the same, so the cross direction shrinks by the same factor).
+local ELONGATED_ASPECT_MIN <const> = 1.8
+local ELONGATED_ASPECT_MAX <const> = 3.0
+
+--- Chain: a gently bending line through the cluster's centre, this many
+--- spacings long per town, each segment turning up to CHAIN_MAX_TURN radians
+--- from the one before. Towns fill a band along it, widening only if needed.
+local CHAIN_LENGTH_PER_TOWN_MIN <const> = 0.8
+local CHAIN_LENGTH_PER_TOWN_MAX <const> = 1.2
+local CHAIN_MAX_TURN <const> = 0.6
+
+--- Polycentric: the extra cores sit this far from the first. Satellite: the
+--- outlying towns sit this far from the core. Both are metres at Normal
+--- density and scale up with looser settings, so the parts stay distinct.
+local POLY_GAP_MIN <const> = 1500.0
+local POLY_GAP_MAX <const> = 3000.0
+local SATELLITE_DIST_MIN <const> = 2500.0
+local SATELLITE_DIST_MAX <const> = 4000.0
+local SATELLITE_SHARE <const> = 0.35
+local SHAPE_REFERENCE_SPACING <const> = 770.0
 local ANGLES_PER_RING <const> = 12
 
 --- How far a town may wander off its ring, as a share of that ring's radius.
@@ -173,6 +207,32 @@ local record Placed
 	x : number
 	y : number
 	spacing : number
+end
+
+--- One part of a cluster's shape that towns are placed around: the core, an
+--- extra core of a polycentric cluster, or one outlying point of a satellite
+--- cluster.
+local record Anchor
+	x : number
+	y : number
+	--- movers meant to land here, and how many have
+	quota : integer
+	placed : integer
+	--- the radius this part is expected to fill; spacing grows towards it
+	radius : number
+end
+
+local record Shape
+	kind : string
+	--- anchors[1] is always the cluster's centre
+	anchors : {Anchor}
+	--- elongated: stretch factor and direction (radians)
+	aspect : number
+	angle : number
+	--- chain: the bending line, as points, and its length
+	pathX : {number}
+	pathY : {number}
+	pathLength : number
 end
 
 local record State
@@ -247,21 +307,27 @@ local function pick(list : {number}, index : integer, fallback : number) : numbe
 	return fallback
 end
 
---- clusterCount, keepFraction, isolatedShare, ratioLow, ratioHigh, baseSpacing
-local function readParams() : integer, number, number, number, number, number
+--- clusterCount, keepFraction, isolatedShare, ratioLow, ratioHigh, baseSpacing,
+--- shapeMode (1 = Round only, 2 = Mixed, 3 = Varied)
+local function readParams() : integer, number, number, number, number, number, integer
 	local all = api.engine.config.getModParams()
 	local own = all ~= nil and all[MOD_ID] as {string : integer} or nil
 	if own == nil then
 		log.message(LOG .. "no mod params found; using defaults")
-		return 4, 0.45, 0.10, 0.55, 0.80, DEFAULT_SPACING
+		return 4, 0.45, 0.10, 0.55, 0.80, DEFAULT_SPACING, DEFAULT_SHAPE_MODE
 	end
 	local variation = own["cluster.variation"]
+	local shapeMode = own["cluster.shapes"]
+	if shapeMode == nil or shapeMode < 1 or shapeMode > 3 then
+		shapeMode = DEFAULT_SHAPE_MODE
+	end
 	return math.floor(pick(CLUSTER_COUNTS as {number}, own["cluster.count"], 4)),
 		pick(KEEP_FRACTIONS, own["cluster.keep"], 0.45),
 		pick(ISOLATED_SHARES, own["cluster.isolated"], 0.10),
 		pick(VARIATION_RATIO_MIN, variation, 0.55),
 		pick(VARIATION_RATIO_MAX, variation, 0.80),
-		pick(DENSITY_SPACINGS, own["cluster.density"], DEFAULT_SPACING)
+		pick(DENSITY_SPACINGS, own["cluster.density"], DEFAULT_SPACING),
+		shapeMode
 end
 
 --- How far the playable map reaches from `origin` along one direction, found
@@ -399,18 +465,11 @@ local function isBuildable(x : number, y : number) : boolean
 	return (hi - lo) <= MAX_SLOPE_DROP
 end
 
---- Find somewhere near `centre` for one relocated town: work outwards ring by
---- ring, and take the first spot that is buildable and far enough from every
---- town already placed. Returns false if the neighbourhood is full, in which
---- case the caller leaves the town where the generator put it rather than
---- losing it. The flag is a separate return rather than a nil position, so the
---- signature stays honest to Teal - the game type-checks this file at load.
----
---- `spacing` is this cluster's base spacing (density slider times the
---- cluster's own multiplier) and `clusterRadius` the radius the cluster is
---- expected to fill. A candidate's required spacing grows from `spacing` at the
---- core to (1 + SPACING_GROWTH) times it at that radius. Also returns the
---- spacing the chosen spot demands, for later placements to respect.
+--- The spacing a town needs at distance `reach` from the middle of its part of
+--- a cluster. `spacing` is the cluster's base spacing (density slider times the
+--- cluster's own multiplier) and `clusterRadius` the radius the part is
+--- expected to fill; the requirement grows from `spacing` to
+--- (1 + SPACING_GROWTH) times it at that radius.
 local function spacingAt(spacing : number, clusterRadius : number, reach : number) : number
 	-- Measured from one spacing out: nothing can stand closer to the core, so
 	-- measuring from the centre put even the innermost towns half-way up the
@@ -422,9 +481,226 @@ local function spacingAt(spacing : number, clusterRadius : number, reach : numbe
 	return math.max(MIN_TOWN_SPACING, spacing * (1 + SPACING_GROWTH * t))
 end
 
-local function findSpot(cx : number, cy : number, spacing : number, clusterRadius : number,
+local function between(lo : number, hi : number, rng : Rng) : number
+	return lo + nextRandom(rng) * (hi - lo)
+end
+
+--- Which shape a cluster gets, for the Cluster Shapes setting and the number
+--- of towns the cluster is expected to hold.
+local function pickKind(mode : integer, expected : integer, rng : Rng) : string
+	if mode == 1 then
+		return "round"
+	end
+	local count = #SHAPE_KINDS
+	if expected < MIN_TOWNS_MULTI_CORE then
+		count = 3
+	end
+	local r = nextRandom(rng)
+	if mode == 2 then
+		local sum = 0.0
+		for i = 1, count do sum = sum + MIXED_WEIGHTS[i] end
+		local acc = 0.0
+		for i = 1, count do
+			acc = acc + MIXED_WEIGHTS[i] / sum
+			if r < acc then return SHAPE_KINDS[i] end
+		end
+		return SHAPE_KINDS[count]
+	end
+	return SHAPE_KINDS[1 + math.floor(r * count)]
+end
+
+--- The point `u` metres along a chain, and the unit normal to the chain there.
+local function pathPoint(shape : Shape, u : number) : number, number, number, number
+	local px, py = shape.pathX, shape.pathY
+	local remaining = u
+	for i = 1, #px - 1 do
+		local dx, dy = px[i + 1] - px[i], py[i + 1] - py[i]
+		local len = math.sqrt(dx * dx + dy * dy)
+		if remaining <= len or i == #px - 1 then
+			local t, nx, ny = 0.0, 0.0, 0.0
+			if len > 0 then
+				t = math.min(1.0, math.max(0.0, remaining / len))
+				nx, ny = -dy / len, dx / len
+			end
+			return px[i] + dx * t, py[i] + dy * t, nx, ny
+		end
+		remaining = remaining - len
+	end
+	return px[1], py[1], 0.0, 0.0
+end
+
+local function distanceToPath(shape : Shape, x : number, y : number) : number
+	local px, py = shape.pathX, shape.pathY
+	local best = math.huge
+	for i = 1, #px - 1 do
+		local dx, dy = px[i + 1] - px[i], py[i + 1] - py[i]
+		local len2 = dx * dx + dy * dy
+		local t = 0.0
+		if len2 > 0 then
+			t = math.min(1.0, math.max(0.0, ((x - px[i]) * dx + (y - py[i]) * dy) / len2))
+		end
+		local d = distance2(x, y, px[i] + dx * t, py[i] + dy * t)
+		if d < best then best = d end
+	end
+	return math.sqrt(best)
+end
+
+--- How far a point is from a cluster's shape, in metres (for an elongated
+--- cluster, measured with the stretch taken out). Decides which cluster a
+--- generated town belongs to and which towns stay where they are.
+local function shapeDistance(shape : Shape, x : number, y : number) : number
+	local core = shape.anchors[1]
+	if shape.kind == "elongated" then
+		local dx, dy = x - core.x, y - core.y
+		local c, sn = math.cos(shape.angle), math.sin(shape.angle)
+		local stretch = math.sqrt(shape.aspect)
+		local u = (dx * c + dy * sn) / stretch
+		local v = (-dx * sn + dy * c) * stretch
+		return math.sqrt(u * u + v * v)
+	elseif shape.kind == "chain" then
+		return distanceToPath(shape, x, y)
+	elseif shape.kind == "polycentric" then
+		local best = math.huge
+		for __, a in ipairs(shape.anchors) do
+			local d = distance2(x, y, a.x, a.y)
+			if d < best then best = d end
+		end
+		return math.sqrt(best)
+	end
+	return math.sqrt(distance2(x, y, core.x, core.y))
+end
+
+--- Lay out a cluster's shape around its centre. Quotas and radii are filled in
+--- later by assignQuotas, once the number of movers is known.
+local function buildShape(kind : string, cx : number, cy : number, spacing : number,
+		expected : integer, rng : Rng) : Shape
+	local shape : Shape = {
+		kind = kind,
+		anchors = { { x = cx, y = cy, quota = 0, placed = 0, radius = 2 * spacing } },
+		aspect = 1.0, angle = 0.0, pathX = {}, pathY = {}, pathLength = 0.0,
+	}
+	local scale = math.max(1.0, spacing / SHAPE_REFERENCE_SPACING)
+
+	if kind == "elongated" then
+		shape.aspect = between(ELONGATED_ASPECT_MIN, ELONGATED_ASPECT_MAX, rng)
+		shape.angle = nextRandom(rng) * math.pi
+
+	elseif kind == "chain" then
+		local length = math.max(3 * spacing,
+			spacing * expected * between(CHAIN_LENGTH_PER_TOWN_MIN, CHAIN_LENGTH_PER_TOWN_MAX, rng))
+		local segments = 2
+		if expected >= 8 then segments = 3 end
+		local heading = nextRandom(rng) * math.pi * 2
+		local px : {number} = { 0.0 }
+		local py : {number} = { 0.0 }
+		for i = 1, segments do
+			if i > 1 then
+				heading = heading + (nextRandom(rng) - 0.5) * 2 * CHAIN_MAX_TURN
+			end
+			px[i + 1] = px[i] + math.cos(heading) * length / segments
+			py[i + 1] = py[i] + math.sin(heading) * length / segments
+		end
+		shape.pathX, shape.pathY, shape.pathLength = px, py, length
+		-- Centre the line on the cluster's centre, by length rather than by
+		-- its end points, so the centre town sits in the middle of the chain.
+		local mx, my = pathPoint(shape, length / 2)
+		for i = 1, #px do
+			px[i] = px[i] + cx - mx
+			py[i] = py[i] + cy - my
+		end
+
+	elseif kind == "polycentric" then
+		local extra = 1
+		if expected >= 9 then extra = 2 end
+		local heading = nextRandom(rng) * math.pi * 2
+		for i = 1, extra do
+			if i > 1 then
+				heading = heading + math.pi * between(0.6, 1.4, rng)
+			end
+			local gap = scale * between(POLY_GAP_MIN, POLY_GAP_MAX, rng)
+			shape.anchors[#shape.anchors + 1] = {
+				x = cx + math.cos(heading) * gap, y = cy + math.sin(heading) * gap,
+				quota = 0, placed = 0, radius = 2 * spacing,
+			}
+		end
+
+	elseif kind == "satellite" then
+		local count = math.min(5, math.max(3, math.floor(expected * SATELLITE_SHARE + 0.5)))
+		count = math.max(1, math.min(count, expected - 2))
+		local heading = nextRandom(rng) * math.pi * 2
+		local arc = math.pi * 2 / count
+		for i = 1, count do
+			local a = heading + (i - 1) * arc + (nextRandom(rng) - 0.5) * arc * 0.5
+			local d = scale * between(SATELLITE_DIST_MIN, SATELLITE_DIST_MAX, rng)
+			shape.anchors[#shape.anchors + 1] = {
+				x = cx + math.cos(a) * d, y = cy + math.sin(a) * d,
+				quota = 0, placed = 0, radius = 2 * spacing,
+			}
+		end
+	end
+	return shape
+end
+
+--- Share a cluster's movers between the parts of its shape, and work out how
+--- far each part is expected to reach. `stays` are the towns already standing
+--- in the cluster; they count towards the core's size.
+local function assignQuotas(shape : Shape, movers : integer, stays : integer, spacing : number, rng : Rng)
+	local anchors = shape.anchors
+	if shape.kind == "satellite" and #anchors > 1 then
+		-- one town per outlying point while the movers last; the rest go to
+		-- the core
+		local outer = math.min(#anchors - 1, movers)
+		for i = 2, #anchors do
+			if i - 1 <= outer then anchors[i].quota = 1 else anchors[i].quota = 0 end
+		end
+		anchors[1].quota = movers - outer
+	elseif shape.kind == "polycentric" and #anchors > 1 then
+		local weights : {number} = { 1.0 }
+		for i = 2, #anchors do weights[i] = between(0.5, 0.9, rng) end
+		local parts = share(movers, weights)
+		for i, a in ipairs(anchors) do a.quota = parts[i] end
+	else
+		anchors[1].quota = movers
+	end
+
+	for i, a in ipairs(anchors) do
+		local n = a.quota
+		if i == 1 then n = n + stays end
+		if shape.kind == "chain" or (shape.kind == "satellite" and i > 1) then
+			-- a chain grows along its line, not outwards; a satellite is one town
+			a.radius = 2 * spacing
+		else
+			a.radius = math.max(2 * spacing, 0.75 * spacing * math.sqrt(n))
+		end
+	end
+end
+
+--- Find a spot for one relocated town around part `a` of a cluster's shape:
+--- work outwards ring by ring and take one of the spots on the first ring that
+--- has any that are buildable and far enough from every town already placed.
+--- Returns false if the neighbourhood is full, in which case the caller tries
+--- elsewhere. The flag is a separate return rather than a nil position, so the
+--- signature stays honest to Teal - the game type-checks this file at load.
+---
+--- Round parts use plain rings. An elongated core uses rings stretched along
+--- the shape's direction. A chain samples along its line, with a band around
+--- it that widens ring by ring. A candidate's required spacing grows from
+--- `spacing` towards (1 + SPACING_GROWTH) times it at the part's radius; the
+--- spacing the chosen spot demands is returned for later placements.
+local function findSpot(shape : Shape, a : integer, spacing : number,
 		placed : {Placed}, rng : Rng) : boolean, number, number, number
-	local step = math.pi * 2 / ANGLES_PER_RING
+	local anchor = shape.anchors[a]
+	local onChain = shape.kind == "chain" and a == 1
+	local stretched = shape.kind == "elongated" and a == 1
+	local stretch = math.sqrt(shape.aspect)
+	local cosA, sinA = math.cos(shape.angle), math.sin(shape.angle)
+
+	local slots = ANGLES_PER_RING
+	if onChain then
+		-- a long line needs more samples per pass to cover its length
+		slots = ANGLES_PER_RING * math.max(1, math.ceil(shape.pathLength / (4 * spacing)))
+	end
+	local step = math.pi * 2 / slots
 	local firstRing = spacing * FIRST_RING_SHARE
 	local ringStep = spacing * RING_STEP_SHARE
 
@@ -447,12 +723,26 @@ local function findSpot(cx : number, cy : number, spacing : number, clusterRadiu
 		local spotsX : {number} = {}
 		local spotsY : {number} = {}
 		local spotsS : {number} = {}
-		for slot = 0, ANGLES_PER_RING - 1 do
-			local angle = phase + slot * step + (nextRandom(rng) - 0.5) * step * 0.8
+		for slot = 0, slots - 1 do
 			local reach = radius + (nextRandom(rng) - 0.5) * 2 * wobble
-			local x = cx + math.cos(angle) * reach
-			local y = cy + math.sin(angle) * reach
-			local need = spacingAt(spacing, clusterRadius, reach)
+			local x, y = 0.0, 0.0
+			if onChain then
+				local u = nextRandom(rng) * shape.pathLength
+				local offset = (nextRandom(rng) - 0.5) * 2 * reach
+				local px, py, nx, ny = pathPoint(shape, u)
+				x = px + nx * offset
+				y = py + ny * offset
+			else
+				local angle = phase + slot * step + (nextRandom(rng) - 0.5) * step * 0.8
+				local lx, ly = math.cos(angle) * reach, math.sin(angle) * reach
+				if stretched then
+					lx, ly = lx * stretch, ly / stretch
+					lx, ly = lx * cosA - ly * sinA, lx * sinA + ly * cosA
+				end
+				x = anchor.x + lx
+				y = anchor.y + ly
+			end
+			local need = spacingAt(spacing, anchor.radius, reach)
 
 			local clear = true
 			for __, p in ipairs(placed) do
@@ -477,6 +767,48 @@ local function findSpot(cx : number, cy : number, spacing : number, clusterRadiu
 	return false, 0, 0, 0
 end
 
+--- Place one mover in a cluster: the part of its shape with the most of its
+--- share outstanding first, then any other part, so a full or unbuildable
+--- part does not strand the town.
+local function placeInShape(shape : Shape, spacing : number, placed : {Placed},
+		rng : Rng) : boolean, number, number, number
+	local order : {integer} = {}
+	for i = 1, #shape.anchors do order[i] = i end
+	table.sort(order, function(a : integer, b : integer) : boolean
+		local ra = shape.anchors[a].quota - shape.anchors[a].placed
+		local rb = shape.anchors[b].quota - shape.anchors[b].placed
+		if ra ~= rb then return ra > rb end
+		return a < b
+	end)
+	for __, i in ipairs(order) do
+		local ok, x, y, need = findSpot(shape, i, spacing, placed, rng)
+		if ok then
+			shape.anchors[i].placed = shape.anchors[i].placed + 1
+			return true, x, y, need
+		end
+	end
+	return false, 0, 0, 0
+end
+
+--- One log line per cluster shape, for tools/plot_run.py.
+local function logShape(k : integer, shape : Shape)
+	local anchors = ""
+	for i, a in ipairs(shape.anchors) do
+		if i > 1 then anchors = anchors .. "|" end
+		anchors = anchors .. string.format("%.0f:%.0f:%.0f:%d", a.x, a.y, a.radius, a.quota)
+	end
+	local path = "-"
+	if #shape.pathX > 0 then
+		path = ""
+		for i = 1, #shape.pathX do
+			if i > 1 then path = path .. "|" end
+			path = path .. string.format("%.0f:%.0f", shape.pathX[i], shape.pathY[i])
+		end
+	end
+	log.message(LOG .. string.format("SHAPE %d kind=%s aspect=%.2f angle=%.3f anchors=%s path=%s",
+		k, shape.kind, shape.aspect, shape.angle, anchors, path))
+end
+
 --- Rebuild the town layout. Returns the number of towns the world should end up
 --- with, or 0 if there was nothing worth doing.
 local function redistribute() : integer
@@ -495,7 +827,7 @@ local function redistribute() : integer
 	end
 	local total = #towns
 
-	local clusterCount, keepFraction, isolatedShare, ratioLow, ratioHigh, baseSpacing = readParams()
+	local clusterCount, keepFraction, isolatedShare, ratioLow, ratioHigh, baseSpacing, shapeMode = readParams()
 	local stayCount = math.max(1, math.floor(total * keepFraction + 0.5))
 	if stayCount >= total then
 		log.message(LOG .. "every town stays put; nothing to do")
@@ -531,32 +863,12 @@ local function redistribute() : integer
 
 	-- Debug output for plotting a run outside the game (tools/plot_run.py).
 	log.message(LOG .. string.format(
-		"PARAMS count=%d keep=%.2f isolated=%.2f ratio=%.2f..%.2f spacing=%.0f",
-		clusterCount, keepFraction, isolatedShare, ratioLow, ratioHigh, baseSpacing))
+		"PARAMS count=%d keep=%.2f isolated=%.2f ratio=%.2f..%.2f spacing=%.0f shapes=%d",
+		clusterCount, keepFraction, isolatedShare, ratioLow, ratioHigh, baseSpacing, shapeMode))
 	log.message(LOG .. string.format("BOUNDS x=%.0f..%.0f y=%.0f..%.0f", minX, maxX, minY, maxY))
 	for i = 1, #centres do
 		log.message(LOG .. string.format("CENTRE %d x=%.0f y=%.0f", i, centreX[i], centreY[i]))
 	end
-
-	for __, town in ipairs(towns) do
-		local nearest = math.huge
-		local nearestIndex = 1
-		for i, centre in ipairs(centres) do
-			local d = distance2(town.x, town.y, centre.x, centre.y)
-			if d < nearest then
-				nearest = d
-				nearestIndex = i
-			end
-		end
-		town.dist = nearest
-		town.centre = nearestIndex
-	end
-
-	-- Nearest to a centre keep the position the generator gave them; they are
-	-- already where we want towns to be.
-	table.sort(towns, function(a : Candidate, b : Candidate) : boolean
-		return a.dist < b.dist
-	end)
 
 	local movers = total - stayCount
 	local isolatedCount = math.floor(movers * isolatedShare + 0.5)
@@ -586,6 +898,38 @@ local function redistribute() : integer
 		local j = 1 + math.floor(nextRandom(rng) * i)
 		weights[i], weights[j] = weights[j], weights[i]
 	end
+
+	-- Each cluster's shape, laid out around its centre. A shape needs to know
+	-- roughly how many towns it will hold (a chain's length, how many
+	-- satellites), so give it the share of the non-isolated towns its weight
+	-- implies; the exact quotas follow once the stayers are known.
+	local expected = share(total - isolatedCount, weights)
+	local shapes : {Shape} = {}
+	for i = 1, #centres do
+		local kind = pickKind(shapeMode, expected[i], rng)
+		shapes[i] = buildShape(kind, centreX[i], centreY[i], clusterSpacing[i], expected[i], rng)
+	end
+
+	-- Every generated town belongs to the cluster whose shape it is nearest to.
+	for __, town in ipairs(towns) do
+		local nearest = math.huge
+		local nearestIndex = 1
+		for i, shape in ipairs(shapes) do
+			local d = shapeDistance(shape, town.x, town.y)
+			if d < nearest then
+				nearest = d
+				nearestIndex = i
+			end
+		end
+		town.dist = nearest
+		town.centre = nearestIndex
+	end
+
+	-- Nearest to a shape keep the position the generator gave them; they are
+	-- already where we want towns to be.
+	table.sort(towns, function(a : Candidate, b : Candidate) : boolean
+		return a.dist < b.dist
+	end)
 
 	-- Towns that keep their position have to follow the weights too. Capping
 	-- only the movers leaves the clusters barely more than a fifth apart,
@@ -658,37 +1002,37 @@ local function redistribute() : integer
 	local placedIn : {integer} = {}
 	for i = 1, #centres do placedIn[i] = 0 end
 
-	-- The radius each cluster is expected to fill. n towns in a roughly
+	-- Share each cluster's movers between the parts of its shape. A part's
+	-- radius is how far it is expected to reach: n towns in a roughly
 	-- hexagonal packing cover a disc of about 0.53 * spacing * sqrt(n); with the
 	-- spacing averaging ~1.25x the base across the growth, and room for the
-	-- jitter, that is 0.75 * base * sqrt(n). At least two spacings, so even a
-	-- three-town cluster has a core and a fringe. Spacing reaches its fringe
-	-- value here.
-	local clusterRadius : {number} = {}
-	for i = 1, #centres do
-		local n = stays[i] + quota[i]
-		clusterRadius[i] = math.max(2 * clusterSpacing[i], 0.75 * clusterSpacing[i] * math.sqrt(n))
+	-- jitter, that is 0.75 * base * sqrt(n), and at least two spacings, so even
+	-- a three-town part has a core and a fringe.
+	for i, shape in ipairs(shapes) do
+		assignQuotas(shape, quota[i], stays[i], clusterSpacing[i], rng)
 		log.message(LOG .. string.format("CLUSTER %d spacing=%.0f radius=%.0f towns=%d",
-			i, clusterSpacing[i], clusterRadius[i], n))
+			i, clusterSpacing[i], shape.anchors[1].radius, stays[i] + quota[i]))
+		logShape(i, shape)
 	end
 
 	local moved, stranded = 0, 0
 	for __, town in ipairs(towns) do
 		if town.kind == "move" then
-			-- Try the centre with the most of its quota outstanding first, and
-			-- fall through to the others if its neighbourhood turns out to be
-			-- full - better a slightly off-quota cluster than a stranded town.
+			-- Try the cluster with the most of its quota outstanding first, and
+			-- fall through to the others if it turns out to be full - better a
+			-- slightly off-quota cluster than a stranded town.
 			local order : {integer} = {}
 			for i = 1, #centres do order[i] = i end
 			table.sort(order, function(a : integer, b : integer) : boolean
-				return (quota[a] - placedIn[a]) > (quota[b] - placedIn[b])
+				local ra, rb = quota[a] - placedIn[a], quota[b] - placedIn[b]
+				if ra ~= rb then return ra > rb end
+				return a < b
 			end)
 
 			local settled = false
 			for __, k in ipairs(order) do
 				if quota[k] - placedIn[k] > 0 then
-					local ok, x, y, need = findSpot(centreX[k], centreY[k],
-						clusterSpacing[k], clusterRadius[k], placed, rng)
+					local ok, x, y, need = placeInShape(shapes[k], clusterSpacing[k], placed, rng)
 					if ok then
 						town.x = x
 						town.y = y

@@ -58,6 +58,20 @@
             "yearTo": 0
         },
         {
+            "defaultIndex": 3,
+            "key": "cluster.shapes",
+            "name": "Cluster Shapes",
+            "tooltip": "How the towns in a cluster are laid out.\n\nRound only gives compact round groups. Varied picks a different shape for every cluster: round, stretched along one direction, a chain along a curving line, two or three cores side by side, or a core with outlying towns a few kilometres out. Mixed is mostly round with the occasional other shape. Very small clusters are always round, stretched or a chain.",
+            "uiType": "Slider",
+            "values": [
+                "Round only",
+                "Mixed",
+                "Varied"
+            ],
+            "yearFrom": 0,
+            "yearTo": 0
+        },
+        {
             "defaultIndex": 2,
             "key": "cluster.keep",
             "name": "Towns Left In Place",

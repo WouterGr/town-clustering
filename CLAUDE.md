@@ -41,6 +41,7 @@ param's `values` list.
 | `cluster.count`    | Cluster Count  | 2 / 3 / 4 / 5 / 6 / 8                |
 | `cluster.variation` | Cluster Sizes | Equal / Mild / Varied / Lopsided    |
 | `cluster.density`  | Cluster Density | Packed / Very Dense / Dense / Normal / Loose / Very Loose / Sparse / Scattered |
+| `cluster.shapes`   | Cluster Shapes | Round only / Mixed / Varied (default) |
 | `cluster.keep`     | Towns Left In Place | 30% / 45% / 60% / 75% / 100%    |
 | `cluster.isolated` | Isolated Towns | None / 5% / 10% / 20%                |
 
@@ -56,6 +57,16 @@ nearest-neighbour distance lands at roughly 720 / 820 / 920 / 1020 / 1150 / 1350
 1600 / 1900 m. Each cluster multiplies it by its own draw (0.8-1.25), and spacing
 grows from one spacing out from the core to 1.5x at the cluster's expected radius
 (at least two spacings). 600 m stays the hard floor.
+
+`cluster.shapes` gives each cluster a shape instead of rings around one town:
+round, elongated (1.8-3x along a random direction), chain (a bending line,
+0.8-1.2 spacings per town), polycentric (2-3 cores 1.5-3 km apart) or satellite
+(a core plus 3-5 single towns 2.5-4 km out; distances scale up with looser
+density). Varied draws all five equally, Mixed is 40% round, and clusters
+expected to hold fewer than 5 towns only draw round, elongated or chain.
+Generated towns belong to the cluster whose *shape* they are nearest, and the
+nearest ones stay. Each shape is logged as a SHAPE line; `tools/plot_run.py`
+draws them.
 
 There is no "cluster rate" parameter. An earlier draft specified one; it was
 replaced by `cluster.keep` + `cluster.isolated`, which say the same thing in
