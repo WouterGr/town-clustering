@@ -15,8 +15,10 @@ next to a cluster, and the inter-town road network is rebuilt.
 
 Cluster sizes follow a geometric series whose ratio is drawn per map from the
 range the `cluster.variation` slider selects (`VARIATION_RATIO_MIN` ..
-`VARIATION_RATIO_MAX`, floored by `SIZE_MIN_WEIGHT`), shuffled across the
-centres.
+`VARIATION_RATIO_MAX`; over more than 8 clusters the per-step ratio is stretched
+to the same overall fall-off). Every cluster first gets the minimum size and only
+the towns beyond it follow the series; the largest sizes go to the centres with
+the most room.
 Both the towns that stay and the towns that move are shared out by those
 weights - weighting only the movers leaves the sizes barely a fifth apart,
 because the towns that stay are spread evenly by geography.
@@ -38,12 +40,19 @@ param's `values` list.
 
 | key                | name           | values                               |
 |--------------------|----------------|--------------------------------------|
-| `cluster.count`    | Cluster Count  | 2 / 3 / 4 / 5 / 6 / 8                |
+| `cluster.count`    | Cluster Count  | Auto (default) / 2 / 3 / 4 / 5 / 6 / 8 / 10 / 12 / 16 |
 | `cluster.variation` | Cluster Sizes | Equal / Mild / Varied / Lopsided    |
 | `cluster.density`  | Cluster Density | Packed / Very Dense / Dense / Normal / Loose / Very Loose / Sparse / Scattered |
 | `cluster.shapes`   | Cluster Shapes | Round only / Mixed / Varied (default) |
 | `cluster.keep`     | Towns Left In Place | 30% / 45% / 60% / 75% / 100%    |
 | `cluster.isolated` | Isolated Towns | None / 5% / 10% / 20%                |
+
+`cluster.count` Auto forms one cluster per ~6 towns that end up in clusters
+(all but the isolated ones), at most 16: 10 clusters on a 67-town map with 20%
+isolated. Whether Auto or chosen, every cluster gets at least 4 towns (fewer
+clusters are formed if needed) and at most 2.5x the average; the balanced sizes
+then drive both the towns that stay and the movers. The COUNT log line shows the
+requested and resolved count.
 
 `cluster.keep` is the share of generated towns that keep the position the
 generator gave them; the rest are moved next to a cluster. The total never

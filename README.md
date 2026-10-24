@@ -47,7 +47,7 @@ left exactly as the stock generator made them.
 
 | Setting             | Values                       | Meaning                                               |
 |---------------------|------------------------------|-------------------------------------------------------|
-| Cluster Count       | 2 / 3 / 4 / 5 / 6 / 8        | How many groups to form                               |
+| Cluster Count       | Auto / 2 ... 16              | How many groups to form; Auto scales with the number of towns |
 | Cluster Sizes       | Equal / Mild / Varied / Lopsided | How much the clusters differ in size              |
 | Cluster Density     | Packed ... Scattered (8 steps) | Typical distance between towns in a cluster, ~700 m to ~1900 m |
 | Cluster Shapes      | Round only / Mixed / Varied  | Layout of each cluster: round, stretched, chain, several cores, or core with satellites |

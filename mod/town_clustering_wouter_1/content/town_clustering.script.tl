@@ -34,7 +34,21 @@ local MOD_ID <const> = "town_clustering_wouter_1"
 --- Slider index (1-based) to value. Index 0 or missing falls back to DEFAULT.
 --- Confirmed 1-based against the stock climate generators, which default to
 --- index 3 of five values and mean "Medium" by it.
-local CLUSTER_COUNTS <const> = { 2, 3, 4, 5, 6, 8 }
+--- Cluster Count slider: 0 is Auto.
+local CLUSTER_COUNTS <const> = { 0, 2, 3, 4, 5, 6, 8, 10, 12, 16 }
+
+--- Auto aims for about this many towns per cluster, counting the towns that
+--- end up in clusters (everything but the isolated ones): 10 clusters on a
+--- 67-town map with 20% isolated, 11 with none, more on larger maps.
+local AUTO_TOWNS_PER_CLUSTER <const> = 6.0
+local AUTO_MAX_CLUSTERS <const> = 16
+
+--- Every cluster gets at least MIN_CLUSTER_TOWNS towns and at most
+--- MAX_CLUSTER_SHARE times the average, whether the count is Auto or chosen.
+--- Fewer clusters are formed if there are not enough towns for the minimum;
+--- a cluster above the maximum hands its excess to the smallest one.
+local MIN_CLUSTER_TOWNS <const> = 4
+local MAX_CLUSTER_SHARE <const> = 2.5
 local KEEP_FRACTIONS <const> = { 0.30, 0.45, 0.60, 0.75, 1.00 }
 local ISOLATED_SHARES <const> = { 0.0, 0.05, 0.10, 0.20 }
 
@@ -184,10 +198,6 @@ local ANGLES_PER_RING <const> = 12
 --- shape a fixed spacing cannot produce.
 local JITTER_SHARE <const> = 0.18
 
---- No cluster drops below this share of the largest one's weight. Without a
---- floor, eight clusters at the low end of the ratio range leaves the last few
---- holding a single town each, which reads as a stray rather than as a group.
-local SIZE_MIN_WEIGHT <const> = 0.18
 
 --- A candidate is rejected if the ground rises or falls more than
 --- MAX_SLOPE_DROP across a probe of SLOPE_PROBE metres either side of it, or if
@@ -359,21 +369,21 @@ local function pick(list : {number}, index : integer, fallback : number) : numbe
 	return fallback
 end
 
---- clusterCount, keepFraction, isolatedShare, ratioLow, ratioHigh, baseSpacing,
+--- clusterCount (0 = Auto), keepFraction, isolatedShare, ratioLow, ratioHigh, baseSpacing,
 --- shapeMode (1 = Round only, 2 = Mixed, 3 = Varied)
 local function readParams() : integer, number, number, number, number, number, integer
 	local all = api.engine.config.getModParams()
 	local own = all ~= nil and all[MOD_ID] as {string : integer} or nil
 	if own == nil then
 		log.message(LOG .. "no mod params found; using defaults")
-		return 4, 0.45, 0.10, 0.55, 0.80, DEFAULT_SPACING, DEFAULT_SHAPE_MODE
+		return 0, 0.45, 0.10, 0.55, 0.80, DEFAULT_SPACING, DEFAULT_SHAPE_MODE
 	end
 	local variation = own["cluster.variation"]
 	local shapeMode = own["cluster.shapes"]
 	if shapeMode == nil or shapeMode < 1 or shapeMode > 3 then
 		shapeMode = DEFAULT_SHAPE_MODE
 	end
-	return math.floor(pick(CLUSTER_COUNTS as {number}, own["cluster.count"], 4)),
+	return math.floor(pick(CLUSTER_COUNTS as {number}, own["cluster.count"], 0)),
 		pick(KEEP_FRACTIONS, own["cluster.keep"], 0.45),
 		pick(ISOLATED_SHARES, own["cluster.isolated"], 0.10),
 		pick(VARIATION_RATIO_MIN, variation, 0.55),
@@ -561,6 +571,32 @@ local function spacingAt(spacing : number, clusterRadius : number, reach : numbe
 		t = math.min(1.0, math.max(0.0, (reach - spacing) / (clusterRadius - spacing)))
 	end
 	return math.max(MIN_TOWN_SPACING, spacing * (1 + SPACING_GROWTH * t))
+end
+
+--- Bring every cluster size within [minSize, maxSize]: raise the smallest from
+--- the largest, then trim anything too large into the smallest. Sizes are
+--- moved one town at a time, so the total never changes.
+local function balanceSizes(sizes : {integer}, minSize : integer, maxSize : integer)
+	for __ = 1, 10000 do
+		local small, big = 0, 0
+		for i = 1, #sizes do
+			if sizes[i] < minSize and (small == 0 or sizes[i] < sizes[small]) then small = i end
+			if big == 0 or sizes[i] > sizes[big] then big = i end
+		end
+		if small == 0 or sizes[big] <= minSize then break end
+		sizes[small] = sizes[small] + 1
+		sizes[big] = sizes[big] - 1
+	end
+	for __ = 1, 10000 do
+		local small, big = 0, 0
+		for i = 1, #sizes do
+			if sizes[i] > maxSize and (big == 0 or sizes[i] > sizes[big]) then big = i end
+			if small == 0 or sizes[i] < sizes[small] then small = i end
+		end
+		if big == 0 or sizes[small] >= maxSize then break end
+		sizes[small] = sizes[small] + 1
+		sizes[big] = sizes[big] - 1
+	end
 end
 
 local function between(lo : number, hi : number, rng : Rng) : number
@@ -998,6 +1034,25 @@ local function redistribute() : integer
 	local minX, maxX, minY, maxY = mapBounds(towns)
 	local bounds : Bounds = { minX = minX, maxX = maxX, minY = minY, maxY = maxY }
 
+	-- How many clusters. Auto follows the number of towns that will end up in
+	-- clusters; either way there must be room for the minimum size in each.
+	local movers = total - stayCount
+	local isolatedCount = math.floor(movers * isolatedShare + 0.5)
+	local clusterTowns = total - isolatedCount
+	local requested = clusterCount
+	if clusterCount == 0 then
+		clusterCount = math.min(AUTO_MAX_CLUSTERS,
+			math.floor(clusterTowns / AUTO_TOWNS_PER_CLUSTER + 0.5))
+	end
+	clusterCount = math.max(1, math.min(clusterCount, clusterTowns // MIN_CLUSTER_TOWNS))
+	if clusterTowns >= 2 * MIN_CLUSTER_TOWNS then
+		clusterCount = math.max(2, clusterCount)
+	end
+	local requestedText = tostring(requested)
+	if requested == 0 then requestedText = "auto" end
+	log.message(LOG .. string.format("COUNT requested=%s resolved=%d for %d towns in clusters",
+		requestedText, clusterCount, clusterTowns))
+
 	local centres = chooseCentres(towns, clusterCount, bounds, rng)
 
 	-- A centre is a reference into `towns`, so if the centre town itself is
@@ -1025,9 +1080,6 @@ local function redistribute() : integer
 		log.message(LOG .. string.format("CENTRE %d x=%.0f y=%.0f", i, centreX[i], centreY[i]))
 	end
 
-	local movers = total - stayCount
-	local isolatedCount = math.floor(movers * isolatedShare + 0.5)
-
 	-- How big should each cluster be?
 	--
 	-- Sharing the towns out evenly makes the clusters come out the same size,
@@ -1039,15 +1091,22 @@ local function redistribute() : integer
 	-- much room each centre has (below), so the big one is not simply whichever
 	-- centre the sampling happened to pick first.
 	local ratio = ratioLow + nextRandom(rng) * (ratioHigh - ratioLow)
+	-- The ratio ranges were tuned for up to 8 clusters. Over more, the same
+	-- per-step ratio falls off so fast that most clusters end at the minimum
+	-- size (simulated: 7 of 10 at exactly 4 towns), so stretch it to cover the
+	-- same overall fall-off from first to last as 8 clusters do.
+	local step = ratio
+	if #centres > 8 then
+		step = ratio ^ (7 / (#centres - 1))
+	end
+	-- No floor on the weights: the minimum cluster size (below) is what keeps
+	-- the small clusters from becoming strays now, and a floor here handed every
+	-- cluster an extra town and flattened the tail of the series.
 	local weights : {number} = {}
 	local w = 1.0
 	for i = 1, #centres do
-		if w < SIZE_MIN_WEIGHT then
-			weights[i] = SIZE_MIN_WEIGHT
-		else
-			weights[i] = w
-		end
-		w = w * ratio
+		weights[i] = w
+		w = w * step
 	end
 	-- The largest clusters go preferably to the centres with the most room
 	-- around them. A big cluster spreads furthest, and given to a centre near
@@ -1082,7 +1141,21 @@ local function redistribute() : integer
 	-- roughly how many towns it will hold (a chain's length, how many
 	-- satellites), so give it the share of the non-isolated towns its weight
 	-- implies; the exact quotas follow once the stayers are known.
-	local expected = share(total - isolatedCount, weights)
+	-- Every cluster first gets the minimum size, and only the towns beyond that
+	-- are shared out by weight. Sharing everything by weight and then raising
+	-- the small ones left most clusters sitting exactly at the minimum when the
+	-- average is close to it (simulated with 10 clusters: 56% at 4 towns).
+	-- Then hold every cluster under the maximum, and let the weights follow the
+	-- balanced sizes, so everything shared out below - the towns that stay and
+	-- the towns that move - lands on those sizes.
+	local floorSize = math.min(MIN_CLUSTER_TOWNS, clusterTowns // #centres)
+	local extra = share(clusterTowns - floorSize * #centres, weights)
+	local expected : {integer} = {}
+	for i = 1, #centres do expected[i] = floorSize + extra[i] end
+	local maxSize = math.max(2 * MIN_CLUSTER_TOWNS,
+		math.floor(MAX_CLUSTER_SHARE * clusterTowns / #centres + 0.5))
+	balanceSizes(expected, MIN_CLUSTER_TOWNS, maxSize)
+	for i = 1, #centres do weights[i] = expected[i] end
 	local shapes : {Shape} = {}
 	for i = 1, #centres do
 		local kind = pickKind(shapeMode, expected[i], rng)
@@ -1227,20 +1300,32 @@ local function redistribute() : integer
 		end
 	end
 
-	local quota = share(moverCount, weights)
-
-	-- A cluster with nothing in it is just a gap. Borrow from the largest.
+	-- Each cluster's movers make up the difference between its balanced size
+	-- and the towns already standing in it. If the isolated towns did not use
+	-- up exactly their share, the few left over (or missing) go to (or come
+	-- from) the clusters furthest from their size limits.
+	local quota : {integer} = {}
+	local quotaSum = 0
 	for i = 1, #centres do
-		if stays[i] + quota[i] == 0 then
-			local big = 1
-			for k = 2, #centres do
-				if quota[k] > quota[big] then big = k end
-			end
-			if quota[big] > 1 then
-				quota[big] = quota[big] - 1
-				quota[i] = 1
-			end
+		quota[i] = math.max(0, expected[i] - stays[i])
+		quotaSum = quotaSum + quota[i]
+	end
+	while quotaSum < moverCount do
+		local k = 1
+		for i = 2, #centres do
+			if stays[i] + quota[i] < stays[k] + quota[k] then k = i end
 		end
+		quota[k] = quota[k] + 1
+		quotaSum = quotaSum + 1
+	end
+	while quotaSum > moverCount do
+		local k = 0
+		for i = 1, #centres do
+			if quota[i] > 0 and (k == 0 or stays[i] + quota[i] > stays[k] + quota[k]) then k = i end
+		end
+		if k == 0 then break end
+		quota[k] = quota[k] - 1
+		quotaSum = quotaSum - 1
 	end
 
 	local placedIn : {integer} = {}

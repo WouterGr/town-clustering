@@ -7,18 +7,22 @@
     "options": null,
     "params": [
         {
-            "defaultIndex": 3,
+            "defaultIndex": 1,
             "key": "cluster.count",
             "name": "Cluster Count",
-            "tooltip": "How many separate groups of towns to form.\n\nTowns are generated normally and then rearranged into these groups.",
+            "tooltip": "How many separate groups of towns to form.\n\nAuto forms about one cluster per six towns, so larger maps and higher town densities get more clusters. Every cluster gets at least four towns and at most two and a half times the average, so a chosen count can come out lower on a map with few towns.\n\nTowns are generated normally and then rearranged into these groups.",
             "uiType": "Slider",
             "values": [
+                "Auto",
                 "2",
                 "3",
                 "4",
                 "5",
                 "6",
-                "8"
+                "8",
+                "10",
+                "12",
+                "16"
             ],
             "yearFrom": 0,
             "yearTo": 0
