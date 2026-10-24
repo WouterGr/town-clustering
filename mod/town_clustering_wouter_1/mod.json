@@ -42,7 +42,7 @@
             "defaultIndex": 4,
             "key": "cluster.density",
             "name": "Cluster Density",
-            "tooltip": "How far apart the towns within a cluster are.\n\nPacked puts town centres 600 m apart, Scattered 1800 m. Spacing grows towards the edge of each cluster, and every cluster draws its own variation on top, so some come out tighter than others.",
+            "tooltip": "How far apart the towns within a cluster are.\n\nNeighbouring towns end up roughly 700 m apart on Packed, 1000 m on Normal and 1900 m on Scattered. Spacing grows towards the edge of each cluster, and every cluster draws its own variation on top, so some come out tighter than others.",
             "uiType": "Slider",
             "values": [
                 "Packed",

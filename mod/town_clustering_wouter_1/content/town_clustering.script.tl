@@ -71,14 +71,22 @@ local MIN_TOWN_SPACING <const> = 600.0
 
 --- Base spacing between town centres in a cluster, per Cluster Density slider
 --- position (Packed .. Scattered). MIN_TOWN_SPACING stays the hard floor under
---- all of them. Packed is the closest to the original fixed 600 m, though the
---- per-cluster multiplier and the growth towards the fringe still loosen it.
-local DENSITY_SPACINGS <const> = { 600.0, 700.0, 800.0, 950.0, 1100.0, 1300.0, 1550.0, 1800.0 }
-local DEFAULT_SPACING <const> = 950.0
+--- all of them.
+---
+--- These are the *required* spacing at the core, not the distance towns end up
+--- at. Picking at random among the valid spots on a ring, plus the growth
+--- towards the fringe, leaves the nearest neighbour about 1.3x further out. The
+--- values are calibrated (flat-terrain simulation of findSpot) so the median
+--- nearest-neighbour distance lands at roughly 720 / 820 / 920 / 1020 / 1150 /
+--- 1350 / 1600 / 1900 m. Packed sits below the floor on purpose: the floor then
+--- decides most of it, which keeps Packed close to the original fixed 600 m.
+local DENSITY_SPACINGS <const> = { 530.0, 610.0, 700.0, 770.0, 870.0, 1020.0, 1210.0, 1440.0 }
+local DEFAULT_SPACING <const> = 770.0
 
---- Spacing grows from the core of a cluster to its outskirts: a town at the
---- cluster's expected radius needs (1 + SPACING_GROWTH) times the base spacing.
---- Dense middle, looser fringe.
+--- Spacing grows from the core of a cluster to its outskirts: from the base
+--- spacing one spacing out from the core (the first spot a town can actually
+--- take, since the core town occupies the middle) to (1 + SPACING_GROWTH)
+--- times it at the cluster's expected radius. Dense middle, looser fringe.
 local SPACING_GROWTH <const> = 0.5
 
 --- Each cluster draws its own multiplier on the base spacing, so one cluster
@@ -404,7 +412,13 @@ end
 --- core to (1 + SPACING_GROWTH) times it at that radius. Also returns the
 --- spacing the chosen spot demands, for later placements to respect.
 local function spacingAt(spacing : number, clusterRadius : number, reach : number) : number
-	local t = math.min(1.0, reach / clusterRadius)
+	-- Measured from one spacing out: nothing can stand closer to the core, so
+	-- measuring from the centre put even the innermost towns half-way up the
+	-- growth and small clusters at the maximum straight away.
+	local t = 0.0
+	if clusterRadius > spacing then
+		t = math.min(1.0, math.max(0.0, (reach - spacing) / (clusterRadius - spacing)))
+	end
 	return math.max(MIN_TOWN_SPACING, spacing * (1 + SPACING_GROWTH * t))
 end
 
@@ -644,13 +658,16 @@ local function redistribute() : integer
 	local placedIn : {integer} = {}
 	for i = 1, #centres do placedIn[i] = 0 end
 
-	-- The radius each cluster is expected to fill: n towns at spacing s in a
-	-- roughly hexagonal packing cover a disc of about 0.53 * s * sqrt(n); 0.6
-	-- leaves room for the jitter. Spacing reaches its fringe value here.
+	-- The radius each cluster is expected to fill. n towns in a roughly
+	-- hexagonal packing cover a disc of about 0.53 * spacing * sqrt(n); with the
+	-- spacing averaging ~1.25x the base across the growth, and room for the
+	-- jitter, that is 0.75 * base * sqrt(n). At least two spacings, so even a
+	-- three-town cluster has a core and a fringe. Spacing reaches its fringe
+	-- value here.
 	local clusterRadius : {number} = {}
 	for i = 1, #centres do
 		local n = stays[i] + quota[i]
-		clusterRadius[i] = math.max(clusterSpacing[i], 0.6 * clusterSpacing[i] * math.sqrt(n))
+		clusterRadius[i] = math.max(2 * clusterSpacing[i], 0.75 * clusterSpacing[i] * math.sqrt(n))
 		log.message(LOG .. string.format("CLUSTER %d spacing=%.0f radius=%.0f towns=%d",
 			i, clusterSpacing[i], clusterRadius[i], n))
 	end

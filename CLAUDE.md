@@ -50,10 +50,12 @@ changes, so Town Density needs no adjustment. `cluster.isolated` is the share of
 the moved towns left standing alone out in the country, scaled down so they read
 as outlying hamlets.
 
-`cluster.density` sets the base spacing between town centres in a cluster
-(600 / 700 / 800 / 950 / 1100 / 1300 / 1550 / 1800 m). Each cluster multiplies it
-by its own draw (0.8-1.25), and spacing grows to 1.5x towards the cluster's
-expected radius. 600 m stays the hard floor.
+`cluster.density` sets the required spacing at a cluster's core
+(530 / 610 / 700 / 770 / 870 / 1020 / 1210 / 1440 m), calibrated so the median
+nearest-neighbour distance lands at roughly 720 / 820 / 920 / 1020 / 1150 / 1350 /
+1600 / 1900 m. Each cluster multiplies it by its own draw (0.8-1.25), and spacing
+grows from one spacing out from the core to 1.5x at the cluster's expected radius
+(at least two spacings). 600 m stays the hard floor.
 
 There is no "cluster rate" parameter. An earlier draft specified one; it was
 replaced by `cluster.keep` + `cluster.isolated`, which say the same thing in
