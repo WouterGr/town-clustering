@@ -4,7 +4,7 @@
 function data()
 	return {
 		updateScript = {
-			fileName = "town_clustering_1::/town_clustering.script@update",
+			fileName = "town_clustering_wouter_1::/town_clustering.script@update",
 		},
 	}
 end

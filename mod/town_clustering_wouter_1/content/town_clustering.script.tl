@@ -29,7 +29,7 @@
 local entity_util = ug_require "::/scripts/entity_util.tl" as EntityUtil
 
 local LOG <const> = "[town-clustering] "
-local MOD_ID <const> = "town_clustering_1"
+local MOD_ID <const> = "town_clustering_wouter_1"
 
 --- Slider index (1-based) to value. Index 0 or missing falls back to DEFAULT.
 --- Confirmed 1-based against the stock climate generators, which default to

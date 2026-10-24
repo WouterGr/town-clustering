@@ -24,7 +24,7 @@ Where to write the PNG.
 param(
 	[ValidateSet("arrows", "pruned")]
 	[string]$Variant = "arrows",
-	[string]$OutFile = "$PSScriptRoot\..\mod\town_clustering_1\_metadata\0.png"
+	[string]$OutFile = "$PSScriptRoot\..\mod\town_clustering_wouter_1\_metadata\0.png"
 )
 
 $ErrorActionPreference = "Stop"

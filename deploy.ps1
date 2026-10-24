@@ -28,12 +28,14 @@ so it is the cheapest way to find packaging problems before uploading.
 [CmdletBinding()]
 param(
 	[switch]$Staging,
-	[switch]$Validate
+	[switch]$Validate,
+	# Root of the Steam installation that holds userdata\ and steamapps\.
+	[string]$SteamRoot = "D:\Steam"
 )
 
 $ErrorActionPreference = "Stop"
 
-$ModId = "town_clustering_1"
+$ModId = "town_clustering_wouter_1"
 $Source = Join-Path $PSScriptRoot "mod\$ModId"
 
 if (-not (Test-Path $Source)) {
@@ -46,7 +48,7 @@ $Folder = if ($Staging) { "staging_area" } else { "mods" }
 
 # Transport Fever 3 is Steam appid 3493540. The per-account userdata folder
 # holds both destinations side by side.
-$Local = Get-ChildItem "C:\Program Files (x86)\Steam\userdata\*\3493540\local" -Directory -ErrorAction SilentlyContinue |
+$Local = Get-ChildItem (Join-Path $SteamRoot "userdata\*\3493540\local") -Directory -ErrorAction SilentlyContinue |
 	Select-Object -First 1
 
 if (-not $Local) {
@@ -73,7 +75,7 @@ if ($Validate) {
 	# Not yet exercised, so treat a non-zero exit as information rather than
 	# proof the mod is broken - the in-game mod manager runs the same validator
 	# and shows a readable report.
-	$Exe = "C:\Program Files (x86)\Steam\steamapps\common\Transport Fever 3\TransportFever3.exe"
+	$Exe = Join-Path $SteamRoot "steamapps\common\Transport Fever 3\TransportFever3.exe"
 	if (-not (Test-Path $Exe)) {
 		Write-Warning "Game executable not found, skipping validation: $Exe"
 		return

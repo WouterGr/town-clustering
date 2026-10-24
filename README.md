@@ -4,7 +4,7 @@ A mod for **Transport Fever 3**. The stock map generator spreads towns evenly
 across the map; this mod leaves dense groups of towns separated by empty
 countryside, which gives inter-city lines somewhere to actually go.
 
-![Town Clustering](mod/town_clustering_1/_metadata/0.png)
+![Town Clustering](mod/town_clustering_wouter_1/_metadata/0.png)
 
 ## How it works
 
@@ -93,7 +93,7 @@ is a drawn illustration, **not a screenshot** - see below.
 ## Repository layout
 
 ```
-mod/town_clustering_1/      the publishable mod; deploy.ps1 installs this
+mod/town_clustering_wouter_1/      the publishable mod; deploy.ps1 installs this
   mod.json                  manifest: id, revision, params, severities
   _content.json             content file list
   _metadata/modinfo.json    name, summary, description, authors, tags

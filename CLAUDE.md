@@ -32,7 +32,7 @@ node-tree findings are kept.
 
 ## Mod parameters
 
-Declared in `mod/town_clustering_1/mod.json`; read back in the game script via
+Declared in `mod/town_clustering_wouter_1/mod.json`; read back in the game script via
 `api.engine.config.getModParams()`, which returns **1-based** indices into each
 param's `values` list.
 
@@ -57,7 +57,7 @@ entry may still sit in the game's `settings.lua` and is ignored.
 ## Layout
 
 ```
-mod/town_clustering_1/      the publishable mod (deploy.ps1 installs this)
+mod/town_clustering_wouter_1/      the publishable mod (deploy.ps1 installs this)
 ```
 
 ## Conventions
