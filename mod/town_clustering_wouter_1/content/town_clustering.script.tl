@@ -413,6 +413,17 @@ local function redistribute() : integer
 	local rng : Rng = { seed = math.abs(seed) + 1 }
 
 	local centres = chooseCentres(towns, clusterCount, rng)
+
+	-- Debug output for plotting a run outside the game. Logged before any town
+	-- moves: a centre is a reference into `towns`, so if the centre town itself
+	-- is moved later its x/y change with it.
+	log.message(LOG .. string.format(
+		"PARAMS count=%d keep=%.2f isolated=%.2f ratio=%.2f..%.2f",
+		clusterCount, keepFraction, isolatedShare, ratioLow, ratioHigh))
+	for i, centre in ipairs(centres) do
+		log.message(LOG .. string.format("CENTRE %d x=%.0f y=%.0f", i, centre.x, centre.y))
+	end
+
 	for __, town in ipairs(towns) do
 		local nearest = math.huge
 		local nearestIndex = 1
@@ -608,6 +619,30 @@ local function redistribute() : integer
 				api.cmd.makeTownUpdateSizeCmd(town.source.existing, scaled, true))
 		end
 	end
+
+	-- Debug output: every town's final position and fate, then the distance
+	-- from each town to its nearest neighbour - the number behind "towns in a
+	-- cluster are too close together".
+	local nearestDist : {number} = {}
+	for i, town in ipairs(towns) do
+		log.message(LOG .. string.format("TOWN %s c=%d x=%.0f y=%.0f",
+			town.kind, town.centre, town.x, town.y))
+		local best = math.huge
+		for j, other in ipairs(towns) do
+			if i ~= j then
+				local d = distance2(town.x, town.y, other.x, other.y)
+				if d < best then best = d end
+			end
+		end
+		nearestDist[#nearestDist + 1] = math.sqrt(best)
+	end
+	table.sort(nearestDist)
+	local n = #nearestDist
+	log.message(LOG .. string.format(
+		"SPACING nearest neighbour: min=%.0f p10=%.0f median=%.0f p90=%.0f max=%.0f",
+		nearestDist[1], nearestDist[math.max(1, math.floor(n * 0.1 + 0.5))],
+		nearestDist[math.max(1, math.floor(n * 0.5 + 0.5))],
+		nearestDist[math.max(1, math.floor(n * 0.9 + 0.5))], nearestDist[n]))
 
 	local sizes = ""
 	for i = 1, #centres do
