@@ -137,6 +137,27 @@ local SATELLITE_DIST_MIN <const> = 2500.0
 local SATELLITE_DIST_MAX <const> = 4000.0
 local SATELLITE_SHARE <const> = 0.35
 local SHAPE_REFERENCE_SPACING <const> = 770.0
+
+--- The map border is avoided, not forbidden.
+---
+--- Cluster centres: a candidate within EDGE_MARGIN_SHARE of the map's shorter
+--- side from the border has its claim (its distance to the centres already
+--- chosen) scaled down, to EDGE_CENTRE_MIN_FACTOR right at the edge, and each
+--- next centre is drawn from the CENTRE_PICK_FROM best claims rather than
+--- always the single best - so corners stop being the automatic answer.
+local EDGE_MARGIN_SHARE <const> = 0.15
+local EDGE_CENTRE_MIN_FACTOR <const> = 0.35
+local CENTRE_PICK_FROM <const> = 3
+
+--- Town spots: within EDGE_SPOT_SOFT metres of the border a candidate is picked
+--- less often, down to EDGE_SPOT_MIN_WEIGHT of the usual chance at the edge.
+local EDGE_SPOT_SOFT <const> = 1500.0
+local EDGE_SPOT_MIN_WEIGHT <const> = 0.25
+
+--- Shapes: a direction (chain, elongated) or an extra point (polycentric core,
+--- satellite) is drawn up to ORIENT_TRIES times until it stays EDGE_SPOT_SOFT
+--- clear of the border; failing that, the draw that stays clearest is used.
+local ORIENT_TRIES <const> = 4
 local ANGLES_PER_RING <const> = 12
 
 --- How far a town may wander off its ring, as a share of that ring's radius.
@@ -233,6 +254,19 @@ local record Shape
 	pathX : {number}
 	pathY : {number}
 	pathLength : number
+end
+
+--- The playable map, as probed by mapBounds.
+local record Bounds
+	minX : number
+	maxX : number
+	minY : number
+	maxY : number
+end
+
+--- Distance from a point to the nearest map border; negative outside the map.
+local function edgeDistance(b : Bounds, x : number, y : number) : number
+	return math.min(x - b.minX, b.maxX - x, y - b.minY, b.maxY - y)
 end
 
 local record State
@@ -403,27 +437,57 @@ local function distance2(ax : number, ay : number, bx : number, by : number) : n
 	return dx * dx + dy * dy
 end
 
---- Farthest-point sampling: start somewhere, then repeatedly take the town
---- furthest from everything chosen so far. Gives centres spread across the map
---- rather than bunched in one corner, without needing a map-size constant.
-local function chooseCentres(towns : {Candidate}, count : integer, rng : Rng) : {Candidate}
-	local centres : {Candidate} = { towns[1 + math.floor(nextRandom(rng) * #towns)] }
+--- Farthest-point sampling, softened: start at a random town away from the
+--- border, then repeatedly take one of the towns furthest from everything
+--- chosen so far. Spreads the centres across the map without needing a
+--- map-size constant.
+---
+--- Pure farthest-point sampling on a rectangular map picks the corners first,
+--- every time - test runs had four of eight centres in the four corners. So a
+--- town's claim is scaled down near the border, and the next centre is drawn
+--- from the few best claims instead of always the single best.
+local function chooseCentres(towns : {Candidate}, count : integer, bounds : Bounds,
+		rng : Rng) : {Candidate}
+	local margin = EDGE_MARGIN_SHARE * math.min(bounds.maxX - bounds.minX, bounds.maxY - bounds.minY)
+	local function edgeFactor(town : Candidate) : number
+		local t = math.min(1.0, math.max(0.0, edgeDistance(bounds, town.x, town.y) / margin))
+		return EDGE_CENTRE_MIN_FACTOR + (1 - EDGE_CENTRE_MIN_FACTOR) * t
+	end
+
+	local inland : {Candidate} = {}
+	for __, town in ipairs(towns) do
+		if edgeDistance(bounds, town.x, town.y) >= margin then
+			inland[#inland + 1] = town
+		end
+	end
+	local pool = towns
+	if #inland > 0 then pool = inland end
+
+	local first = pool[1 + math.floor(nextRandom(rng) * #pool)]
+	local centres : {Candidate} = { first }
+	local chosen : {Candidate : boolean} = { [first] = true }
+
 	while #centres < count and #centres < #towns do
-		local best : Candidate = nil
-		local bestDist = -1.0
+		local ranked : {Candidate} = {}
+		local claim : {Candidate : number} = {}
 		for __, town in ipairs(towns) do
-			local nearest = math.huge
-			for __, centre in ipairs(centres) do
-				local d = distance2(town.x, town.y, centre.x, centre.y)
-				if d < nearest then nearest = d end
-			end
-			if nearest > bestDist then
-				bestDist = nearest
-				best = town
+			if not chosen[town] then
+				local nearest = math.huge
+				for __, centre in ipairs(centres) do
+					local d = distance2(town.x, town.y, centre.x, centre.y)
+					if d < nearest then nearest = d end
+				end
+				claim[town] = math.sqrt(nearest) * edgeFactor(town)
+				ranked[#ranked + 1] = town
 			end
 		end
-		if best == nil then break end
-		centres[#centres + 1] = best
+		if #ranked == 0 then break end
+		table.sort(ranked, function(a : Candidate, b : Candidate) : boolean
+			return claim[a] > claim[b]
+		end)
+		local nextCentre = ranked[1 + math.floor(nextRandom(rng) * math.min(CENTRE_PICK_FROM, #ranked))]
+		centres[#centres + 1] = nextCentre
+		chosen[nextCentre] = true
 	end
 	return centres
 end
@@ -573,7 +637,7 @@ end
 --- Lay out a cluster's shape around its centre. Quotas and radii are filled in
 --- later by assignQuotas, once the number of movers is known.
 local function buildShape(kind : string, cx : number, cy : number, spacing : number,
-		expected : integer, rng : Rng) : Shape
+		expected : integer, bounds : Bounds, rng : Rng) : Shape
 	local shape : Shape = {
 		kind = kind,
 		anchors = { { x = cx, y = cy, quota = 0, placed = 0, radius = 2 * spacing } },
@@ -583,31 +647,60 @@ local function buildShape(kind : string, cx : number, cy : number, spacing : num
 
 	if kind == "elongated" then
 		shape.aspect = between(ELONGATED_ASPECT_MIN, ELONGATED_ASPECT_MAX, rng)
-		shape.angle = nextRandom(rng) * math.pi
+		-- Point the long axis away from the border if the first draw runs into
+		-- it: judged by the ends of the axis at the reach the cluster is
+		-- expected to fill.
+		local reach = math.max(2 * spacing, 0.75 * spacing * math.sqrt(expected)) * math.sqrt(shape.aspect)
+		local bestClear = -math.huge
+		for __ = 1, ORIENT_TRIES do
+			local angle = nextRandom(rng) * math.pi
+			local dx, dy = math.cos(angle) * reach, math.sin(angle) * reach
+			local clear = math.min(edgeDistance(bounds, cx + dx, cy + dy), edgeDistance(bounds, cx - dx, cy - dy))
+			if clear > bestClear then
+				bestClear = clear
+				shape.angle = angle
+			end
+			if clear >= EDGE_SPOT_SOFT then break end
+		end
 
 	elseif kind == "chain" then
 		local length = math.max(3 * spacing,
 			spacing * expected * between(CHAIN_LENGTH_PER_TOWN_MIN, CHAIN_LENGTH_PER_TOWN_MAX, rng))
 		local segments = 2
 		if expected >= 8 then segments = 3 end
-		local heading = nextRandom(rng) * math.pi * 2
-		local px : {number} = { 0.0 }
-		local py : {number} = { 0.0 }
-		for i = 1, segments do
-			if i > 1 then
-				heading = heading + (nextRandom(rng) - 0.5) * 2 * CHAIN_MAX_TURN
+		-- Draw the line until it stays clear of the border (judged at its
+		-- bends and ends), keeping the clearest draw if none does.
+		local bestClear = -math.huge
+		local bestX : {number} = {}
+		local bestY : {number} = {}
+		for __ = 1, ORIENT_TRIES do
+			local heading = nextRandom(rng) * math.pi * 2
+			local px : {number} = { 0.0 }
+			local py : {number} = { 0.0 }
+			for i = 1, segments do
+				if i > 1 then
+					heading = heading + (nextRandom(rng) - 0.5) * 2 * CHAIN_MAX_TURN
+				end
+				px[i + 1] = px[i] + math.cos(heading) * length / segments
+				py[i + 1] = py[i] + math.sin(heading) * length / segments
 			end
-			px[i + 1] = px[i] + math.cos(heading) * length / segments
-			py[i + 1] = py[i] + math.sin(heading) * length / segments
+			shape.pathX, shape.pathY, shape.pathLength = px, py, length
+			-- Centre the line on the cluster's centre, by length rather than by
+			-- its end points, so the centre town sits in the middle of the chain.
+			local mx, my = pathPoint(shape, length / 2)
+			local clear = math.huge
+			for i = 1, #px do
+				px[i] = px[i] + cx - mx
+				py[i] = py[i] + cy - my
+				clear = math.min(clear, edgeDistance(bounds, px[i], py[i]))
+			end
+			if clear > bestClear then
+				bestClear = clear
+				bestX, bestY = px, py
+			end
+			if clear >= EDGE_SPOT_SOFT then break end
 		end
-		shape.pathX, shape.pathY, shape.pathLength = px, py, length
-		-- Centre the line on the cluster's centre, by length rather than by
-		-- its end points, so the centre town sits in the middle of the chain.
-		local mx, my = pathPoint(shape, length / 2)
-		for i = 1, #px do
-			px[i] = px[i] + cx - mx
-			py[i] = py[i] + cy - my
-		end
+		shape.pathX, shape.pathY = bestX, bestY
 
 	elseif kind == "polycentric" then
 		local extra = 1
@@ -618,9 +711,19 @@ local function buildShape(kind : string, cx : number, cy : number, spacing : num
 				heading = heading + math.pi * between(0.6, 1.4, rng)
 			end
 			local gap = scale * between(POLY_GAP_MIN, POLY_GAP_MAX, rng)
+			local ax, ay = cx + math.cos(heading) * gap, cy + math.sin(heading) * gap
+			local clear = edgeDistance(bounds, ax, ay)
+			for __ = 2, ORIENT_TRIES do
+				if clear >= EDGE_SPOT_SOFT then break end
+				local h = nextRandom(rng) * math.pi * 2
+				local tx, ty = cx + math.cos(h) * gap, cy + math.sin(h) * gap
+				local c = edgeDistance(bounds, tx, ty)
+				if c > clear then
+					ax, ay, clear, heading = tx, ty, c, h
+				end
+			end
 			shape.anchors[#shape.anchors + 1] = {
-				x = cx + math.cos(heading) * gap, y = cy + math.sin(heading) * gap,
-				quota = 0, placed = 0, radius = 2 * spacing,
+				x = ax, y = ay, quota = 0, placed = 0, radius = 2 * spacing,
 			}
 		end
 
@@ -632,9 +735,22 @@ local function buildShape(kind : string, cx : number, cy : number, spacing : num
 		for i = 1, count do
 			local a = heading + (i - 1) * arc + (nextRandom(rng) - 0.5) * arc * 0.5
 			local d = scale * between(SATELLITE_DIST_MIN, SATELLITE_DIST_MAX, rng)
+			local ax, ay = cx + math.cos(a) * d, cy + math.sin(a) * d
+			-- A satellite off the map or against the border moves round the
+			-- core, then closer in, keeping the clearest of a few tries.
+			local clear = edgeDistance(bounds, ax, ay)
+			for try = 2, ORIENT_TRIES do
+				if clear >= EDGE_SPOT_SOFT then break end
+				local ta = a + (nextRandom(rng) - 0.5) * arc
+				local td = d * (1 - 0.15 * (try - 1))
+				local tx, ty = cx + math.cos(ta) * td, cy + math.sin(ta) * td
+				local c = edgeDistance(bounds, tx, ty)
+				if c > clear then
+					ax, ay, clear = tx, ty, c
+				end
+			end
 			shape.anchors[#shape.anchors + 1] = {
-				x = cx + math.cos(a) * d, y = cy + math.sin(a) * d,
-				quota = 0, placed = 0, radius = 2 * spacing,
+				x = ax, y = ay, quota = 0, placed = 0, radius = 2 * spacing,
 			}
 		end
 	end
@@ -688,7 +804,7 @@ end
 --- `spacing` towards (1 + SPACING_GROWTH) times it at the part's radius; the
 --- spacing the chosen spot demands is returned for later placements.
 local function findSpot(shape : Shape, a : integer, spacing : number,
-		placed : {Placed}, rng : Rng) : boolean, number, number, number
+		placed : {Placed}, bounds : Bounds, rng : Rng) : boolean, number, number, number
 	local anchor = shape.anchors[a]
 	local onChain = shape.kind == "chain" and a == 1
 	local stretched = shape.kind == "elongated" and a == 1
@@ -723,6 +839,8 @@ local function findSpot(shape : Shape, a : integer, spacing : number,
 		local spotsX : {number} = {}
 		local spotsY : {number} = {}
 		local spotsS : {number} = {}
+		local spotsW : {number} = {}
+		local weightSum = 0.0
 		for slot = 0, slots - 1 do
 			local reach = radius + (nextRandom(rng) - 0.5) * 2 * wobble
 			local x, y = 0.0, 0.0
@@ -753,14 +871,27 @@ local function findSpot(shape : Shape, a : integer, spacing : number,
 				end
 			end
 			if clear and isBuildable(x, y) then
+				-- near the border a spot is picked less often, not never
+				local t = math.min(1.0, math.max(0.0, edgeDistance(bounds, x, y) / EDGE_SPOT_SOFT))
+				local weight = EDGE_SPOT_MIN_WEIGHT + (1 - EDGE_SPOT_MIN_WEIGHT) * t
 				spotsX[#spotsX + 1] = x
 				spotsY[#spotsY + 1] = y
 				spotsS[#spotsS + 1] = need
+				spotsW[#spotsW + 1] = weight
+				weightSum = weightSum + weight
 			end
 		end
 
 		if #spotsX > 0 then
-			local choice = 1 + math.floor(nextRandom(rng) * #spotsX)
+			local target = nextRandom(rng) * weightSum
+			local choice = #spotsX
+			for i = 1, #spotsW do
+				target = target - spotsW[i]
+				if target <= 0 then
+					choice = i
+					break
+				end
+			end
 			return true, spotsX[choice], spotsY[choice], spotsS[choice]
 		end
 	end
@@ -771,7 +902,7 @@ end
 --- share outstanding first, then any other part, so a full or unbuildable
 --- part does not strand the town.
 local function placeInShape(shape : Shape, spacing : number, placed : {Placed},
-		rng : Rng) : boolean, number, number, number
+		bounds : Bounds, rng : Rng) : boolean, number, number, number
 	local order : {integer} = {}
 	for i = 1, #shape.anchors do order[i] = i end
 	table.sort(order, function(a : integer, b : integer) : boolean
@@ -781,7 +912,7 @@ local function placeInShape(shape : Shape, spacing : number, placed : {Placed},
 		return a < b
 	end)
 	for __, i in ipairs(order) do
-		local ok, x, y, need = findSpot(shape, i, spacing, placed, rng)
+		local ok, x, y, need = findSpot(shape, i, spacing, placed, bounds, rng)
 		if ok then
 			shape.anchors[i].placed = shape.anchors[i].placed + 1
 			return true, x, y, need
@@ -841,7 +972,10 @@ local function redistribute() : integer
 	end
 	local rng : Rng = { seed = math.abs(seed) + 1 }
 
-	local centres = chooseCentres(towns, clusterCount, rng)
+	local minX, maxX, minY, maxY = mapBounds(towns)
+	local bounds : Bounds = { minX = minX, maxX = maxX, minY = minY, maxY = maxY }
+
+	local centres = chooseCentres(towns, clusterCount, bounds, rng)
 
 	-- A centre is a reference into `towns`, so if the centre town itself is
 	-- moved its x/y change with it. Placement works from these fixed copies.
@@ -858,8 +992,6 @@ local function redistribute() : integer
 		clusterSpacing[i] = baseSpacing
 			* (CLUSTER_SPACING_MIN + nextRandom(rng) * (CLUSTER_SPACING_MAX - CLUSTER_SPACING_MIN))
 	end
-
-	local minX, maxX, minY, maxY = mapBounds(towns)
 
 	-- Debug output for plotting a run outside the game (tools/plot_run.py).
 	log.message(LOG .. string.format(
@@ -907,7 +1039,7 @@ local function redistribute() : integer
 	local shapes : {Shape} = {}
 	for i = 1, #centres do
 		local kind = pickKind(shapeMode, expected[i], rng)
-		shapes[i] = buildShape(kind, centreX[i], centreY[i], clusterSpacing[i], expected[i], rng)
+		shapes[i] = buildShape(kind, centreX[i], centreY[i], clusterSpacing[i], expected[i], bounds, rng)
 	end
 
 	-- Every generated town belongs to the cluster whose shape it is nearest to.
@@ -1032,7 +1164,7 @@ local function redistribute() : integer
 			local settled = false
 			for __, k in ipairs(order) do
 				if quota[k] - placedIn[k] > 0 then
-					local ok, x, y, need = placeInShape(shapes[k], clusterSpacing[k], placed, rng)
+					local ok, x, y, need = placeInShape(shapes[k], clusterSpacing[k], placed, bounds, rng)
 					if ok then
 						town.x = x
 						town.y = y
@@ -1128,6 +1260,23 @@ local function redistribute() : integer
 	end
 	logSpacing("nearest neighbour", nearestDist)
 	logSpacing("moved towns", nearestMoved)
+
+	-- How much the border still attracts: centres inside the margin, and moved
+	-- towns within EDGE_SPOT_SOFT of the edge.
+	local margin = EDGE_MARGIN_SHARE * math.min(maxX - minX, maxY - minY)
+	local edgeCentres, edgeMoved, movedTotal = 0, 0, 0
+	for i = 1, #centres do
+		if edgeDistance(bounds, centreX[i], centreY[i]) < margin then edgeCentres = edgeCentres + 1 end
+	end
+	for __, town in ipairs(towns) do
+		if town.kind == "move" then
+			movedTotal = movedTotal + 1
+			if edgeDistance(bounds, town.x, town.y) < EDGE_SPOT_SOFT then edgeMoved = edgeMoved + 1 end
+		end
+	end
+	log.message(LOG .. string.format(
+		"EDGE %d of %d centres within %.0f m of the border; %d of %d moved towns within %.0f m",
+		edgeCentres, #centres, margin, edgeMoved, movedTotal, EDGE_SPOT_SOFT))
 
 	local sizes = ""
 	for i = 1, #centres do

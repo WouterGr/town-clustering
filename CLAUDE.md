@@ -68,6 +68,15 @@ Generated towns belong to the cluster whose *shape* they are nearest, and the
 nearest ones stay. Each shape is logged as a SHAPE line; `tools/plot_run.py`
 draws them.
 
+The map border is avoided, not forbidden. `mapBounds` probes the playable area
+with `isValidCoordinate`. Cluster centres come from a softened farthest-point
+sampling: a town's claim is scaled down within 15% of the map's shorter side from
+the border (to 0.35x at the edge) and each next centre is drawn from the 3 best
+claims. Chain and elongated directions and polycentric/satellite points are
+redrawn (up to 4 tries) until they stay 1.5 km clear of the border, and town
+spots within 1.5 km of it are picked at down to 0.25x the usual chance. The EDGE
+log line reports how many centres and moved towns still sit near the border.
+
 There is no "cluster rate" parameter. An earlier draft specified one; it was
 replaced by `cluster.keep` + `cluster.isolated`, which say the same thing in
 terms the implementation can actually honour. A stale `cluster.rate`
